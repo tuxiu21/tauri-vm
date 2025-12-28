@@ -10,6 +10,34 @@ use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use tokio::net::ToSocketAddrs;
 
+fn decode_remote_output(bytes: &[u8]) -> String {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    if bytes.len() >= 2 {
+        if bytes.starts_with(&[0xFF, 0xFE]) && (bytes.len() % 2 == 0) {
+            let u16s: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            return String::from_utf16_lossy(&u16s);
+        }
+        if bytes.starts_with(&[0xFE, 0xFF]) && (bytes.len() % 2 == 0) {
+            let u16s: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .collect();
+            return String::from_utf16_lossy(&u16s);
+        }
+    }
+
+    let (text, _, _) = encoding_rs::GBK.decode(bytes);
+    text.into_owned()
+}
+
 struct Client;
 
 impl client::Handler for Client {
@@ -87,7 +115,7 @@ impl SshSession {
             }
         }
 
-        let output_text = String::from_utf8_lossy(&output).to_string();
+        let output_text = decode_remote_output(&output);
         if let Some(status) = exit_status {
             if status != 0 {
                 let trimmed = output_text.trim();
