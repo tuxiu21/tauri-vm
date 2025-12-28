@@ -84,6 +84,7 @@ body {
 }
 
 input,
+textarea,
 button {
   border-radius: 8px;
   border: 1px solid rgba(15, 23, 42, 0.12);
@@ -110,6 +111,7 @@ button:active {
 }
 
 input,
+textarea,
 button {
   outline: none;
 }
@@ -399,6 +401,20 @@ button {
   max-width: 100%;
 }
 
+.diagPresets {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.commandInput {
+  width: 100%;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  line-height: 1.35;
+}
+
 .error {
   color: #b00020;
   font-weight: 600;
@@ -468,6 +484,7 @@ button {
   }
 
   input,
+  textarea,
   button {
     color: #ffffff;
     background-color: rgba(255, 255, 255, 0.06);
@@ -475,6 +492,10 @@ button {
   }
 
   input::placeholder {
+    color: rgba(229, 231, 235, 0.45);
+  }
+
+  textarea::placeholder {
     color: rgba(229, 231, 235, 0.45);
   }
 

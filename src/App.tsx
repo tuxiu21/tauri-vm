@@ -62,6 +62,12 @@ function App() {
   const [dirOutput, setDirOutput] = useState("");
   const [diagError, setDiagError] = useState("");
   const [isDiagRunning, setIsDiagRunning] = useState(false);
+  const [diagCommand, setDiagCommand] = useState<string>(() => {
+    return (
+      safeJsonParse<string>(localStorage.getItem("diag.command")) ??
+      '& "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe" -T ws list'
+    );
+  });
 
   useEffect(() => {
     localStorage.setItem("vmware.ssh", JSON.stringify(ssh));
@@ -70,6 +76,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("vmware.knownVms", JSON.stringify(knownVms));
   }, [knownVms]);
+
+  useEffect(() => {
+    localStorage.setItem("diag.command", JSON.stringify(diagCommand));
+  }, [diagCommand]);
 
   useEffect(() => {
     if (!stopModalVm) return;
@@ -148,6 +158,20 @@ function App() {
     setDiagError("");
     try {
       const output = await invoke<string>("ssh_dir");
+      setDirOutput(output);
+    } catch (err) {
+      setDiagError(String(err));
+    } finally {
+      setIsDiagRunning(false);
+    }
+  }
+
+  async function runDiagCommand() {
+    setIsDiagRunning(true);
+    setDirOutput("");
+    setDiagError("");
+    try {
+      const output = await invoke<string>("ssh_exec", { ssh, command: diagCommand });
       setDirOutput(output);
     } catch (err) {
       setDiagError(String(err));
@@ -437,11 +461,43 @@ function App() {
         <section className="card">
           <div className="cardHeader">
             <h2>SSH 诊断</h2>
-            <p className="muted">用于验证 SSH 通路与密钥加载是否正常。</p>
+            <p className="muted">用于验证 SSH 通路与远程命令执行是否正常（使用上方连接设置）。</p>
           </div>
-          <button type="button" onClick={runDir} disabled={isDiagRunning}>
-            {isDiagRunning ? "Running..." : "Run dir (hardcoded)"}
-          </button>
+
+          <div className="diagPresets">
+            <button
+              type="button"
+              onClick={() =>
+                setDiagCommand('& "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe" -T ws list')
+              }
+              disabled={isDiagRunning}
+            >
+              填入 vmrun list
+            </button>
+            <button type="button" onClick={() => setDiagCommand("dir")} disabled={isDiagRunning}>
+              填入 dir
+            </button>
+          </div>
+
+          <label className="field" style={{ width: "100%" }}>
+            <span>远程命令</span>
+            <textarea
+              className="commandInput"
+              value={diagCommand}
+              onChange={(e) => setDiagCommand(e.target.value)}
+              rows={3}
+              placeholder='例如：powershell -NoProfile -Command "Get-Date"'
+            />
+          </label>
+
+          <div className="actionsRow">
+            <button type="button" className="primary" onClick={runDiagCommand} disabled={isDiagRunning}>
+              {isDiagRunning ? "执行中…" : "执行命令"}
+            </button>
+            <button type="button" onClick={runDir} disabled={isDiagRunning}>
+              {isDiagRunning ? "执行中…" : "Run dir (legacy)"}{" "}
+            </button>
+          </div>
           {diagError ? <p className="error">{diagError}</p> : null}
           <pre className="output">{dirOutput || "Waiting for output..."}</pre>
         </section>

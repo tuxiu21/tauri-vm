@@ -154,6 +154,18 @@ async fn ssh_dir(app: AppHandle) -> Result<String, String> {
     Ok(output)
 }
 
+#[tauri::command]
+async fn ssh_exec(app: AppHandle, ssh: SshConfig, command: String) -> Result<String, String> {
+    if command.len() > 8192 {
+        return Err("Command too long".to_string());
+    }
+
+    let mut session = ssh_connect(&app, &ssh).await?;
+    let output = session.exec_collect(&command).await?;
+    let _ = session.close().await;
+    Ok(output)
+}
+
 fn ps_single_quote_escape(text: &str) -> String {
     text.replace('\'', "''")
 }
@@ -280,6 +292,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             ssh_dir,
+            ssh_exec,
             vmware_list_running,
             vmware_status_for_known,
             vmware_start_vm,
