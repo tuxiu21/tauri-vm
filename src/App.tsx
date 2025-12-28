@@ -1,49 +1,35 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [dirOutput, setDirOutput] = useState("");
+  const [error, setError] = useState("");
+  const [isRunning, setIsRunning] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  async function runDir() {
+    setIsRunning(true);
+    setDirOutput("");
+    setError("");
+    try {
+      const output = await invoke<string>("ssh_dir");
+      setDirOutput(output);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsRunning(false);
+    }
   }
 
   return (
     <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
+      <h1>SSH dir</h1>
+      <p>Connects to 192.168.5.100 as rin and runs dir.</p>
+      <button type="button" onClick={runDir} disabled={isRunning}>
+        {isRunning ? "Running..." : "Run dir"}
+      </button>
+      {error ? <p className="error">{error}</p> : null}
+      <pre className="output">{dirOutput || "Waiting for output..."}</pre>
     </main>
   );
 }

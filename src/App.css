@@ -23,11 +23,11 @@
 
 .container {
   margin: 0;
-  padding-top: 10vh;
+  padding: 10vh 8vw;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  gap: 12px;
+  align-items: flex-start;
 }
 
 .logo {
@@ -57,7 +57,7 @@ a:hover {
 }
 
 h1 {
-  text-align: center;
+  text-align: left;
 }
 
 input,
@@ -93,6 +93,24 @@ button {
 
 #greet-input {
   margin-right: 5px;
+}
+
+.output {
+  width: 100%;
+  min-height: 220px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+  color: #0f0f0f;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error {
+  color: #b00020;
+  font-weight: 600;
 }
 
 @media (prefers-color-scheme: dark) {
