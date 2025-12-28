@@ -1,9 +1,8 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client;
-use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
+use russh::keys::{decode_secret_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
@@ -28,11 +27,10 @@ struct SshSession {
 
 impl SshSession {
     async fn connect<A: ToSocketAddrs>(
-        key_path: &Path,
+        private_key: PrivateKey,
         user: &str,
         addr: A,
     ) -> Result<Self, String> {
-        let key_pair = load_secret_key(key_path, None).map_err(|err| format!("{err:?}"))?;
         let mut config = client::Config::default();
         config.inactivity_timeout = Some(Duration::from_secs(10));
         let config = Arc::new(config);
@@ -44,7 +42,7 @@ impl SshSession {
             .authenticate_publickey(
                 user,
                 PrivateKeyWithHashAlg::new(
-                    Arc::new(key_pair),
+                    Arc::new(private_key),
                     session
                         .best_supported_rsa_hash()
                         .await
@@ -109,13 +107,23 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-#[tauri::command]
-async fn ssh_dir(app: AppHandle) -> Result<String, String> {
-    let key_path = app
+fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
+    let resource_path = app
         .path()
         .resolve("resources/mypc", BaseDirectory::Resource)
         .map_err(|err| format!("{err:?}"))?;
-    let mut session = SshSession::connect(&key_path, "rin", ("192.168.5.100", 22)).await?;
+
+    let key_text = std::fs::read_to_string(&resource_path).unwrap_or_else(|_| {
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/mypc")).to_string()
+    });
+
+    decode_secret_key(&key_text, None).map_err(|err| format!("{err:?}"))
+}
+
+#[tauri::command]
+async fn ssh_dir(app: AppHandle) -> Result<String, String> {
+    let private_key = load_ssh_private_key(&app)?;
+    let mut session = SshSession::connect(private_key, "rin", ("192.168.5.100", 22)).await?;
     let output = session.exec_collect("dir").await?;
     let _ = session.close().await;
     Ok(output)
