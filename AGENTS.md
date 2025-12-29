@@ -28,5 +28,5 @@ No dedicated test runner is configured currently (no `vitest/jest` scripts detec
 - PRs: include a short description, steps to verify (commands + expected behavior), and screenshots/gifs for UI changes.
 
 ## Security & Configuration Tips
-- Avoid committing secrets (SSH keys, tokens). This repo loads an SSH private key from `src-tauri/resources/mypc`; use a non-sensitive dev key and keep real keys out of git.
+- Avoid committing secrets (SSH keys, tokens). The app expects you to upload an SSH private key via the UI and stores it under the OS app data directory; keep real keys out of git.
 - When changing remote/VM control behavior, validate both Windows and Android paths if applicable (see `pnpm android` script and `src-tauri/gen/android/`).

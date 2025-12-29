@@ -7,7 +7,7 @@
 - 远程主机：Windows + OpenSSH Server（可被本机 SSH 访问）
 - 远程主机：已安装 VMware Workstation，并可使用 `vmrun.exe`
   - 默认探测路径：`C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe` / `C:\Program Files\VMware\VMware Workstation\vmrun.exe`
-- SSH 私钥：放在 `src-tauri/resources/mypc`（应用启动时读取）
+- SSH 私钥：在应用里手动上传（保存在本机 app data 目录，不会打包进应用）
 
 ## 使用方法
 

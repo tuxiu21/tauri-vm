@@ -32,6 +32,10 @@ function newId(): string {
 
 function App() {
   const [activeTab, setActiveTab] = useState<"vm" | "diag">("vm");
+  const [sshKeyPresent, setSshKeyPresent] = useState<boolean | null>(null);
+  const [sshKeyError, setSshKeyError] = useState("");
+  const [isKeyWorking, setIsKeyWorking] = useState(false);
+  const keyInputRef = useRef<HTMLInputElement | null>(null);
 
   const [ssh, setSsh] = useState<SshConfig>(() => {
     return (
@@ -122,6 +126,45 @@ function App() {
     }
   }
 
+  async function refreshKeyStatus() {
+    try {
+      const ok = await invoke<boolean>("ssh_key_status");
+      setSshKeyPresent(ok);
+    } catch (err) {
+      setSshKeyPresent(false);
+      setSshKeyError(String(err));
+    }
+  }
+
+  async function uploadSshKey(file: File) {
+    setIsKeyWorking(true);
+    setSshKeyError("");
+    try {
+      if (file.size > 256 * 1024) throw new Error("Key too large");
+      const keyText = await file.text();
+      await invoke<void>("ssh_set_private_key", { keyText });
+      setSshKeyPresent(true);
+      if (keyInputRef.current) keyInputRef.current.value = "";
+    } catch (err) {
+      setSshKeyError(String(err));
+    } finally {
+      setIsKeyWorking(false);
+    }
+  }
+
+  async function clearSshKey() {
+    setIsKeyWorking(true);
+    setSshKeyError("");
+    try {
+      await invoke<void>("ssh_clear_private_key");
+      setSshKeyPresent(false);
+    } catch (err) {
+      setSshKeyError(String(err));
+    } finally {
+      setIsKeyWorking(false);
+    }
+  }
+
   async function startVm(vm: KnownVm) {
     setActionVmId(vm.id);
     setActionText("正在启动…");
@@ -157,7 +200,7 @@ function App() {
     setDirOutput("");
     setDiagError("");
     try {
-      const output = await invoke<string>("ssh_dir");
+      const output = await invoke<string>("ssh_dir", { ssh });
       setDirOutput(output);
     } catch (err) {
       setDiagError(String(err));
@@ -203,6 +246,7 @@ function App() {
 
   useEffect(() => {
     void refresh();
+    void refreshKeyStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -299,6 +343,34 @@ function App() {
                     </>
                   ) : null}
                 </div>
+              </div>
+
+              <div className="formStack">
+                <div className="actionsRow" style={{ marginTop: 0 }}>
+                  <span className={`pill ${sshKeyPresent ? "ok" : "idle"}`}>
+                    SSH key: {sshKeyPresent ? "configured" : "missing"}
+                  </span>
+                  <div style={{ display: "inline-flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <input
+                      ref={keyInputRef}
+                      type="file"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) void uploadSshKey(file);
+                      }}
+                      disabled={isKeyWorking}
+                    />
+                    {sshKeyPresent ? (
+                      <button type="button" onClick={() => void clearSshKey()} disabled={isKeyWorking}>
+                        Clear key
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                {sshKeyError ? <p className="error">{sshKeyError}</p> : null}
+                <p className="muted" style={{ margin: 0 }}>
+                  Private key is stored locally in the app data directory (not bundled in the app).
+                </p>
               </div>
             </div>
 

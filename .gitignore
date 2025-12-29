@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Sensitive keys (do not commit)
+src-tauri/resources/mypc
+src-tauri/resources/*.key
+src-tauri/resources/*.pem
+src-tauri/resources/id_*

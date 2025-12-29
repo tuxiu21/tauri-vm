@@ -6,7 +6,6 @@ use russh::keys::{decode_secret_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
 use serde::Deserialize;
 use serde::Serialize;
-use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 use tokio::net::ToSocketAddrs;
 
@@ -144,16 +143,57 @@ fn greet(name: &str) -> String {
 }
 
 fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
-    let resource_path = app
-        .path()
-        .resolve("resources/mypc", BaseDirectory::Resource)
-        .map_err(|err| format!("{err:?}"))?;
-
-    let key_text = std::fs::read_to_string(&resource_path).unwrap_or_else(|_| {
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/mypc")).to_string()
-    });
+    let key_path = ssh_private_key_path(app)?;
+    let key_text = std::fs::read_to_string(&key_path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            "SSH private key not configured. Please upload it in the app UI.".to_string()
+        } else {
+            format!("{err:?}")
+        }
+    })?;
 
     decode_secret_key(&key_text, None).map_err(|err| format!("{err:?}"))
+}
+
+fn ssh_private_key_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("{err:?}"))?
+        .join("ssh");
+
+    std::fs::create_dir_all(&dir).map_err(|err| format!("{err:?}"))?;
+    Ok(dir.join("private_key"))
+}
+
+#[tauri::command]
+fn ssh_key_status(app: AppHandle) -> Result<bool, String> {
+    let key_path = ssh_private_key_path(&app)?;
+    Ok(key_path.is_file())
+}
+
+#[tauri::command]
+fn ssh_set_private_key(app: AppHandle, key_text: String) -> Result<(), String> {
+    if key_text.len() > 256 * 1024 {
+        return Err("Key too large".to_string());
+    }
+
+    // Validate key format early to return a friendly error.
+    decode_secret_key(&key_text, None).map_err(|err| format!("{err:?}"))?;
+
+    let key_path = ssh_private_key_path(&app)?;
+    std::fs::write(&key_path, key_text).map_err(|err| format!("{err:?}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ssh_clear_private_key(app: AppHandle) -> Result<(), String> {
+    let key_path = ssh_private_key_path(&app)?;
+    match std::fs::remove_file(&key_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("{err:?}")),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -174,9 +214,8 @@ async fn ssh_connect(app: &AppHandle, cfg: &SshConfig) -> Result<SshSession, Str
 }
 
 #[tauri::command]
-async fn ssh_dir(app: AppHandle) -> Result<String, String> {
-    let private_key = load_ssh_private_key(&app)?;
-    let mut session = SshSession::connect(private_key, "rin", ("192.168.5.100", 22)).await?;
+async fn ssh_dir(app: AppHandle, ssh: SshConfig) -> Result<String, String> {
+    let mut session = ssh_connect(&app, &ssh).await?;
     let output = session.exec_collect("dir").await?;
     let _ = session.close().await;
     Ok(output)
@@ -319,6 +358,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
+            ssh_key_status,
+            ssh_set_private_key,
+            ssh_clear_private_key,
             ssh_dir,
             ssh_exec,
             vmware_list_running,
