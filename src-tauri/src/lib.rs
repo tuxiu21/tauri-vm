@@ -282,6 +282,11 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+fn e2e_exit(code: i32) {
+    std::process::exit(code);
+}
+
 fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
     let key_path = ssh_private_key_path(app)?;
     let key_text = std::fs::read_to_string(&key_path).map_err(|err| {
@@ -931,6 +936,7 @@ pub fn run() {
         .manage(TraceStore::default())
         .invoke_handler(tauri::generate_handler![
             greet,
+            e2e_exit,
             trace_list,
             trace_clear,
             ssh_key_status,

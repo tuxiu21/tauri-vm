@@ -17,8 +17,21 @@ export async function sshExec(ssh: SshConfig, command: string, requestId?: strin
   return invoke<string>("ssh_exec", { ssh, command, requestId });
 }
 
+export async function sshDir(ssh: SshConfig) {
+  return invoke<string>("ssh_dir", { ssh });
+}
+
 export async function vmwareListRunning(ssh: SshConfig, requestId?: string) {
   return invoke<string[]>("vmware_list_running", { ssh, requestId });
+}
+
+export type VmItem = {
+  vmx_path: string;
+  is_running: boolean;
+};
+
+export async function vmwareStatusForKnown(ssh: SshConfig, knownVmxPaths: string[], requestId?: string) {
+  return invoke<VmItem[]>("vmware_status_for_known", { ssh, knownVmxPaths, requestId });
 }
 
 export async function vmwareStartVm(ssh: SshConfig, vmxPath: string, requestId?: string) {
@@ -70,4 +83,8 @@ export async function traceList() {
 
 export async function traceClear() {
   return invoke<void>("trace_clear");
+}
+
+export async function e2eExit(code: number) {
+  return invoke<void>("e2e_exit", { code });
 }
