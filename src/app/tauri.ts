@@ -47,6 +47,10 @@ export async function vmwareStartVmWithPassword(
   return invoke<string>("vmware_start_vm", { ssh, vmxPath, vmPassword, requestId });
 }
 
+export async function vmwareStartVmAuto(ssh: SshConfig, vmxPath: string, requestId?: string) {
+  return invoke<string>("vmware_start_vm_auto", { ssh, vmxPath, requestId });
+}
+
 export async function vmwareStopVm(
   ssh: SshConfig,
   vmxPath: string,
@@ -55,6 +59,22 @@ export async function vmwareStopVm(
   vmPassword?: VmPassword,
 ) {
   return invoke<string>("vmware_stop_vm", { ssh, vmxPath, mode, requestId, vmPassword });
+}
+
+export async function vmwareStopVmAuto(ssh: SshConfig, vmxPath: string, mode?: VmStopMode, requestId?: string) {
+  return invoke<string>("vmware_stop_vm_auto", { ssh, vmxPath, mode, requestId });
+}
+
+export async function vmPasswordStatus(vmxPath: string) {
+  return invoke<boolean>("vm_password_status", { vmxPath });
+}
+
+export async function vmPasswordSet(vmxPath: string, vmPassword: VmPassword) {
+  return invoke<void>("vm_password_set", { vmxPath, vmPassword });
+}
+
+export async function vmPasswordClear(vmxPath: string) {
+  return invoke<void>("vm_password_clear", { vmxPath });
 }
 
 export async function vmwareScanDefaultVmx(ssh: SshConfig, requestId?: string) {

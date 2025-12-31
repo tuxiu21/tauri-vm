@@ -23,6 +23,9 @@ const LS = {
   opLog: "vmware.opLog.v1",
 };
 
+const VM_PASSWORD_REQUIRED = "VM_PASSWORD_REQUIRED";
+const VM_PASSWORD_INVALID = "VM_PASSWORD_INVALID";
+
 function defaultSsh(): SshConfig {
   return { host: "192.168.5.100", port: 22, user: "rin" };
 }
@@ -74,7 +77,6 @@ export default function App() {
   const [sshKeyPresent, setSshKeyPresent] = useState<boolean | null>(null);
   const [sshKeyError, setSshKeyError] = useState("");
   const [isKeyWorking, setIsKeyWorking] = useState(false);
-  const [vmPassword, setVmPassword] = useState<string>("");
 
   const [runningVmxPaths, setRunningVmxPaths] = useState<string[]>([]);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
@@ -95,6 +97,12 @@ export default function App() {
   const [scanResults, setScanResults] = useState<string[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [scanSelection, setScanSelection] = useState<Record<string, boolean>>({});
+
+  const [vmPasswordVm, setVmPasswordVm] = useState<KnownVm | null>(null);
+  const [vmPasswordConfigured, setVmPasswordConfigured] = useState<boolean | null>(null);
+  const [vmPasswordDraft, setVmPasswordDraft] = useState("");
+  const [vmPasswordError, setVmPasswordError] = useState("");
+  const [isVmPasswordWorking, setIsVmPasswordWorking] = useState(false);
 
   const [diagOutput, setDiagOutput] = useState("");
   const [diagError, setDiagError] = useState("");
@@ -118,6 +126,61 @@ export default function App() {
 
   function dismissToast(id: string) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  async function openVmPasswordModal(vm: KnownVm) {
+    setVmPasswordVm(vm);
+    setVmPasswordConfigured(null);
+    setVmPasswordDraft("");
+    setVmPasswordError("");
+    setIsVmPasswordWorking(false);
+    try {
+      const status = await tauri.vmPasswordStatus(vm.vmxPath);
+      setVmPasswordConfigured(status);
+    } catch (err) {
+      setVmPasswordError(String(err));
+    }
+  }
+
+  function closeVmPasswordModal() {
+    setVmPasswordVm(null);
+    setVmPasswordConfigured(null);
+    setVmPasswordDraft("");
+    setVmPasswordError("");
+    setIsVmPasswordWorking(false);
+  }
+
+  async function saveVmPassword() {
+    if (!vmPasswordVm) return;
+    setIsVmPasswordWorking(true);
+    setVmPasswordError("");
+    try {
+      await tauri.vmPasswordSet(vmPasswordVm.vmxPath, vmPasswordDraft);
+      setVmPasswordConfigured(true);
+      setVmPasswordDraft("");
+      pushToast({ kind: "success", title: "VM password saved", message: guessVmNameFromVmxPath(vmPasswordVm.vmxPath) });
+      closeVmPasswordModal();
+    } catch (err) {
+      setVmPasswordError(String(err));
+    } finally {
+      setIsVmPasswordWorking(false);
+    }
+  }
+
+  async function clearVmPassword() {
+    if (!vmPasswordVm) return;
+    setIsVmPasswordWorking(true);
+    setVmPasswordError("");
+    try {
+      await tauri.vmPasswordClear(vmPasswordVm.vmxPath);
+      setVmPasswordConfigured(false);
+      setVmPasswordDraft("");
+      pushToast({ kind: "success", title: "VM password cleared", message: guessVmNameFromVmxPath(vmPasswordVm.vmxPath) });
+    } catch (err) {
+      setVmPasswordError(String(err));
+    } finally {
+      setIsVmPasswordWorking(false);
+    }
   }
 
   function pushLog(entry: Omit<LogEvent, "id" | "at">) {
@@ -291,7 +354,7 @@ export default function App() {
     try {
       await withLog(
         "start_vm",
-        (requestId) => tauri.vmwareStartVmWithPassword(ssh, vm.vmxPath, vmPassword || undefined, requestId),
+        (requestId) => tauri.vmwareStartVmAuto(ssh, vm.vmxPath, requestId),
         {
         summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
         meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath) },
@@ -300,8 +363,27 @@ export default function App() {
       pushToast({ kind: "success", title: "已启动", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
-      setGlobalError(String(err));
-      pushToast({ kind: "error", title: "启动失败", message: String(err) });
+      const message = String(err);
+      if (message.includes(VM_PASSWORD_REQUIRED)) {
+        setGlobalError("VM requires a password. Configure it for this VM and retry.");
+        pushToast({
+          kind: "error",
+          title: "VM password required",
+          message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        });
+        void openVmPasswordModal(vm);
+      } else if (message.includes(VM_PASSWORD_INVALID)) {
+        setGlobalError("Stored VM password seems invalid. Update it and retry.");
+        pushToast({
+          kind: "error",
+          title: "VM password invalid",
+          message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        });
+        void openVmPasswordModal(vm);
+      } else {
+        setGlobalError(message);
+        pushToast({ kind: "error", title: "启动失败", message });
+      }
     } finally {
       setActionVmId(null);
       setActionText("");
@@ -315,7 +397,7 @@ export default function App() {
     try {
       await withLog(
         "stop_vm",
-        (requestId) => tauri.vmwareStopVm(ssh, vm.vmxPath, mode, requestId, vmPassword || undefined),
+        (requestId) => tauri.vmwareStopVmAuto(ssh, vm.vmxPath, mode, requestId),
         {
         summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
         meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath), mode: summarizeStopMode(mode) },
@@ -324,8 +406,27 @@ export default function App() {
       pushToast({ kind: "success", title: "已停止", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
-      setGlobalError(String(err));
-      pushToast({ kind: "error", title: "停止失败", message: String(err) });
+      const message = String(err);
+      if (message.includes(VM_PASSWORD_REQUIRED)) {
+        setGlobalError("VM requires a password. Configure it for this VM and retry.");
+        pushToast({
+          kind: "error",
+          title: "VM password required",
+          message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        });
+        void openVmPasswordModal(vm);
+      } else if (message.includes(VM_PASSWORD_INVALID)) {
+        setGlobalError("Stored VM password seems invalid. Update it and retry.");
+        pushToast({
+          kind: "error",
+          title: "VM password invalid",
+          message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        });
+        void openVmPasswordModal(vm);
+      } else {
+        setGlobalError(message);
+        pushToast({ kind: "error", title: "停止失败", message });
+      }
     } finally {
       setActionVmId(null);
       setActionText("");
@@ -437,6 +538,7 @@ export default function App() {
             onNavigateSettings={() => navigate("settings")}
             onStartVm={(vm) => void startVm(vm)}
             onStopVm={(vm, mode) => void stopVm(vm, mode)}
+            onEditVmPassword={(vm) => void openVmPasswordModal(vm)}
             onRemoveVm={removeVm}
             onPinVm={pinVm}
             onOpenScanWizard={() => setScanWizardOpen(true)}
@@ -451,8 +553,6 @@ export default function App() {
             isKeyWorking={isKeyWorking}
             onUploadKeyText={(text) => void uploadSshKeyText(text)}
             onClearKey={() => void clearSshKey()}
-            vmPassword={vmPassword}
-            onChangeVmPassword={setVmPassword}
             scanRoots={scanRoots}
             onSetScanRoots={setScanRoots}
             diagCommand={diagCommand}
@@ -474,6 +574,64 @@ export default function App() {
       </main>
 
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+
+      {vmPasswordVm ? (
+        <Modal
+          title="VM Password"
+          description="Stored locally; used only if vmrun reports the VM is password-protected."
+          onClose={closeVmPasswordModal}
+        >
+          <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="m-0 font-semibold">{vmPasswordVm.nameOverride || guessVmNameFromVmxPath(vmPasswordVm.vmxPath)}</p>
+              <span className={ui.pill}>
+                {vmPasswordConfigured == null ? "Checking..." : vmPasswordConfigured ? "Saved" : "Not set"}
+              </span>
+            </div>
+            <p className={`m-0 mt-1 break-words font-mono text-sm ${ui.muted}`}>{vmPasswordVm.vmxPath}</p>
+          </div>
+
+          <div className="mt-4 grid gap-2">
+            <label className="flex flex-col gap-1.5">
+              <span className={ui.label}>Password</span>
+              <input
+                className={`${ui.input} ${ui.inputPlaceholder}`}
+                type="password"
+                value={vmPasswordDraft}
+                onChange={(e) => setVmPasswordDraft(e.target.value)}
+                placeholder="Enter VM password"
+                autoComplete="off"
+                disabled={isVmPasswordWorking}
+              />
+            </label>
+            {vmPasswordError ? (
+              <p className="m-0 font-semibold text-rose-700 dark:text-rose-200">{vmPasswordError}</p>
+            ) : null}
+          </div>
+
+          <div className="mt-4 flex flex-wrap justify-end gap-2.5">
+            <button
+              type="button"
+              className={`${ui.button} ${ui.buttonPrimary}`}
+              onClick={() => void saveVmPassword()}
+              disabled={isVmPasswordWorking || !vmPasswordDraft.trim()}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className={ui.button}
+              onClick={() => void clearVmPassword()}
+              disabled={isVmPasswordWorking || !vmPasswordConfigured}
+            >
+              Clear
+            </button>
+            <button type="button" className={ui.button} onClick={closeVmPasswordModal} disabled={isVmPasswordWorking}>
+              Close
+            </button>
+          </div>
+        </Modal>
+      ) : null}
 
       {scanWizardOpen ? (
         <Modal

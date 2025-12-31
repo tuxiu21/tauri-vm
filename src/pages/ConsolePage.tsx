@@ -30,6 +30,7 @@ export function ConsolePage(props: {
   onNavigateSettings: () => void;
   onStartVm: (vm: KnownVm) => void;
   onStopVm: (vm: KnownVm, mode: "soft" | "hard") => void;
+  onEditVmPassword: (vm: KnownVm) => void;
   onRemoveVm: (id: string) => void;
   onPinVm: (id: string, pinned: boolean) => void;
   onOpenScanWizard: () => void;
@@ -282,6 +283,14 @@ export function ConsolePage(props: {
                         启动
                       </button>
                     )}
+                    <button
+                      type="button"
+                      className={ui.button}
+                      onClick={() => props.onEditVmPassword(vm)}
+                      disabled={vm.isBusy}
+                    >
+                      Password
+                    </button>
                     <button
                       type="button"
                       className={ui.button}

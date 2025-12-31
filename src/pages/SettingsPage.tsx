@@ -12,8 +12,6 @@ export function SettingsPage(props: {
   isKeyWorking: boolean;
   onUploadKeyText: (keyText: string) => void;
   onClearKey: () => void;
-  vmPassword: string;
-  onChangeVmPassword: (next: string) => void;
   scanRoots: string[];
   onSetScanRoots: (roots: string[]) => void;
   diagCommand: string;
@@ -138,9 +136,10 @@ export function SettingsPage(props: {
             <input
               className={`${ui.input} ${ui.inputPlaceholder}`}
               type="password"
-              value={props.vmPassword}
-              onChange={(e) => props.onChangeVmPassword(e.target.value)}
-              placeholder="Only kept in memory"
+              value=""
+              readOnly
+              disabled
+              placeholder="Per-VM password is configured from the VM list"
               autoComplete="off"
             />
           </label>

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -54,6 +54,9 @@ fn powershell_encoded(script: &str) -> String {
 fn powershell_prelude() -> &'static str {
     r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()"#
 }
+
+const VM_PASSWORD_REQUIRED: &str = "VM_PASSWORD_REQUIRED";
+const VM_PASSWORD_INVALID: &str = "VM_PASSWORD_INVALID";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -341,6 +344,77 @@ fn ssh_clear_private_key(app: AppHandle) -> Result<(), String> {
     }
 }
 
+fn vm_passwords_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("{err:?}"))?
+        .join("vmware");
+
+    std::fs::create_dir_all(&dir).map_err(|err| format!("{err:?}"))?;
+    Ok(dir.join("vm_passwords.json"))
+}
+
+fn normalize_vmx_key(vmx_path: &str) -> String {
+    vmx_path.trim().to_lowercase()
+}
+
+fn load_vm_passwords(app: &AppHandle) -> Result<HashMap<String, String>, String> {
+    let path = vm_passwords_path(app)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(v) => v,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(err) => return Err(format!("{err:?}")),
+    };
+    if text.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    serde_json::from_str::<HashMap<String, String>>(&text).map_err(|err| format!("{err:?}"))
+}
+
+fn save_vm_passwords(app: &AppHandle, map: &HashMap<String, String>) -> Result<(), String> {
+    let path = vm_passwords_path(app)?;
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(map).map_err(|err| format!("{err:?}"))?;
+    std::fs::write(&tmp, bytes).map_err(|err| format!("{err:?}"))?;
+    std::fs::rename(&tmp, &path).map_err(|err| format!("{err:?}"))?;
+    Ok(())
+}
+
+fn get_vm_password(app: &AppHandle, vmx_path: &str) -> Result<Option<String>, String> {
+    let key = normalize_vmx_key(vmx_path);
+    let map = load_vm_passwords(app)?;
+    Ok(map.get(&key).cloned())
+}
+
+#[tauri::command]
+fn vm_password_status(app: AppHandle, vmx_path: String) -> Result<bool, String> {
+    Ok(get_vm_password(&app, &vmx_path)?.is_some())
+}
+
+#[tauri::command]
+fn vm_password_set(app: AppHandle, vmx_path: String, vm_password: String) -> Result<(), String> {
+    if vm_password.trim().is_empty() {
+        return Err("VM password cannot be empty.".to_string());
+    }
+    if vm_password.len() > 4096 {
+        return Err("VM password too large.".to_string());
+    }
+
+    let mut map = load_vm_passwords(&app)?;
+    map.insert(normalize_vmx_key(&vmx_path), vm_password);
+    save_vm_passwords(&app, &map)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn vm_password_clear(app: AppHandle, vmx_path: String) -> Result<(), String> {
+    let mut map = load_vm_passwords(&app)?;
+    map.remove(&normalize_vmx_key(&vmx_path));
+    save_vm_passwords(&app, &map)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct SshConfig {
     host: String,
@@ -546,15 +620,15 @@ impl VmStopMode {
 }
 
 #[tauri::command]
-async fn vmware_start_vm(
-    app: AppHandle,
-    store: tauri::State<'_, TraceStore>,
+async fn vmware_start_vm_inner(
+    app: &AppHandle,
+    store: &TraceStore,
     ssh: SshConfig,
     vmx_path: String,
     vm_password: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
-    let mut session = ssh_connect(&app, &ssh).await?;
+    let mut session = ssh_connect(app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
     let (ps_exec, ps_log) = if let Some(vm_password) = vm_password {
         let pw_quoted = ps_single_quote_escape(&vm_password);
@@ -647,7 +721,7 @@ $out
         )
     } else {
         let ps = format!(
-        r#"
+            r#"
 {}
 {}
 $out = & $vmrun -T ws start '{}' nogui 2>&1
@@ -693,17 +767,75 @@ $out
     }
 }
 
+fn vmrun_requires_password(output: &str) -> bool {
+    let t = output.to_lowercase();
+    if !t.contains("password") {
+        return false;
+    }
+    t.contains("encrypted")
+        || t.contains("protection")
+        || t.contains("requires")
+        || t.contains("need")
+        || t.contains("not correct")
+        || t.contains("incorrect")
+}
+
+fn vmrun_bad_password(output: &str) -> bool {
+    let t = output.to_lowercase();
+    t.contains("password")
+        && (t.contains("password is incorrect") || t.contains("incorrect password") || t.contains("not correct"))
+}
+
 #[tauri::command]
-async fn vmware_stop_vm(
+async fn vmware_start_vm(
     app: AppHandle,
     store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    vmx_path: String,
+    vm_password: Option<String>,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    vmware_start_vm_inner(&app, &store, ssh, vmx_path, vm_password, request_id).await
+}
+
+#[tauri::command]
+async fn vmware_start_vm_auto(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    vmx_path: String,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    match vmware_start_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), None, request_id.clone()).await {
+        Ok(out) => Ok(out),
+        Err(err) => {
+            if !vmrun_requires_password(&err) {
+                return Err(err);
+            }
+            let password = get_vm_password(&app, &vmx_path)?;
+            let Some(password) = password else {
+                return Err(VM_PASSWORD_REQUIRED.to_string());
+            };
+            match vmware_start_vm_inner(&app, &store, ssh, vmx_path, Some(password), request_id).await {
+                Ok(out) => Ok(out),
+                Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
+                Err(err2) => Err(err2),
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn vmware_stop_vm_inner(
+    app: &AppHandle,
+    store: &TraceStore,
     ssh: SshConfig,
     vmx_path: String,
     mode: Option<VmStopMode>,
     vm_password: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
-    let mut session = ssh_connect(&app, &ssh).await?;
+    let mut session = ssh_connect(app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
     let mode = mode.unwrap_or(VmStopMode::Soft);
     let mode_str = mode.as_str();
@@ -750,7 +882,7 @@ $out
         )
     } else {
         let ps = format!(
-        r#"
+            r#"
 {}
 {}
 $out = & $vmrun -T ws stop '{}' {} 2>&1
@@ -759,11 +891,11 @@ if ($null -eq $code) {{ $code = 1 }}
 if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
 $out
 "#,
-        powershell_prelude(),
-        vmrun_locator_ps(),
-        vmx_quoted,
-        mode_str
-    );
+            powershell_prelude(),
+            vmrun_locator_ps(),
+            vmx_quoted,
+            mode_str
+        );
         (ps.clone(), ps)
     };
     let exec_command = powershell_encoded(&ps_exec);
@@ -794,6 +926,48 @@ $out
         Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
+    }
+}
+
+#[tauri::command]
+async fn vmware_stop_vm(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    vmx_path: String,
+    mode: Option<VmStopMode>,
+    vm_password: Option<String>,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    vmware_stop_vm_inner(&app, &store, ssh, vmx_path, mode, vm_password, request_id).await
+}
+
+#[tauri::command]
+async fn vmware_stop_vm_auto(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    vmx_path: String,
+    mode: Option<VmStopMode>,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    match vmware_stop_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), mode.clone(), None, request_id.clone()).await
+    {
+        Ok(out) => Ok(out),
+        Err(err) => {
+            if !vmrun_requires_password(&err) {
+                return Err(err);
+            }
+            let password = get_vm_password(&app, &vmx_path)?;
+            let Some(password) = password else {
+                return Err(VM_PASSWORD_REQUIRED.to_string());
+            };
+            match vmware_stop_vm_inner(&app, &store, ssh, vmx_path, mode, Some(password), request_id).await {
+                Ok(out) => Ok(out),
+                Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
+                Err(err2) => Err(err2),
+            }
+        }
     }
 }
 
@@ -942,12 +1116,17 @@ pub fn run() {
             ssh_key_status,
             ssh_set_private_key,
             ssh_clear_private_key,
+            vm_password_status,
+            vm_password_set,
+            vm_password_clear,
             ssh_dir,
             ssh_exec,
             vmware_list_running,
             vmware_status_for_known,
             vmware_start_vm,
+            vmware_start_vm_auto,
             vmware_stop_vm,
+            vmware_stop_vm_auto,
             vmware_scan_default_vmx,
             vmware_scan_vmx
         ])
