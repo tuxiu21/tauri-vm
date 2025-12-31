@@ -12,6 +12,8 @@ export function SettingsPage(props: {
   isKeyWorking: boolean;
   onUploadKeyText: (keyText: string) => void;
   onClearKey: () => void;
+  vmPassword: string;
+  onChangeVmPassword: (next: string) => void;
   scanRoots: string[];
   onSetScanRoots: (roots: string[]) => void;
   diagCommand: string;
@@ -129,6 +131,20 @@ export function SettingsPage(props: {
               placeholder="rin"
             />
           </label>
+        </div>
+        <div className="mt-3 grid gap-3">
+          <label className="flex flex-col gap-1.5">
+            <span className={ui.label}>VM Password (optional)</span>
+            <input
+              className={`${ui.input} ${ui.inputPlaceholder}`}
+              type="password"
+              value={props.vmPassword}
+              onChange={(e) => props.onChangeVmPassword(e.target.value)}
+              placeholder="Only kept in memory"
+              autoComplete="off"
+            />
+          </label>
+          <p className={`m-0 text-sm ${ui.muted}`}>仅用于受保护/需要密码的 VM，不会保存到本地。</p>
         </div>
       </section>
 

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SshConfig, VmStopMode } from "./types";
+import type { SshConfig, VmPassword, VmStopMode } from "./types";
 
 export async function sshKeyStatus() {
   return invoke<boolean>("ssh_key_status");
@@ -25,8 +25,23 @@ export async function vmwareStartVm(ssh: SshConfig, vmxPath: string, requestId?:
   return invoke<string>("vmware_start_vm", { ssh, vmxPath, requestId });
 }
 
-export async function vmwareStopVm(ssh: SshConfig, vmxPath: string, mode?: VmStopMode, requestId?: string) {
-  return invoke<string>("vmware_stop_vm", { ssh, vmxPath, mode, requestId });
+export async function vmwareStartVmWithPassword(
+  ssh: SshConfig,
+  vmxPath: string,
+  vmPassword?: VmPassword,
+  requestId?: string,
+) {
+  return invoke<string>("vmware_start_vm", { ssh, vmxPath, vmPassword, requestId });
+}
+
+export async function vmwareStopVm(
+  ssh: SshConfig,
+  vmxPath: string,
+  mode?: VmStopMode,
+  requestId?: string,
+  vmPassword?: VmPassword,
+) {
+  return invoke<string>("vmware_stop_vm", { ssh, vmxPath, mode, requestId, vmPassword });
 }
 
 export async function vmwareScanDefaultVmx(ssh: SshConfig, requestId?: string) {

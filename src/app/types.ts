@@ -14,10 +14,11 @@ export type KnownVm = {
 
 export type VmStopMode = "soft" | "hard";
 
+export type VmPassword = string;
+
 export type Toast = {
   id: string;
   kind: "success" | "error" | "info";
   title: string;
   message?: string;
 };
-

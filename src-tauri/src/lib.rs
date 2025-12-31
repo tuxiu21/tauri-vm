@@ -417,7 +417,7 @@ fn parse_vmrun_list_output(output: &str) -> Vec<String> {
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
-        .filter(|line| !line.to_ascii_lowercase().starts_with("total "))
+        .filter(|line| !line.to_ascii_lowercase().starts_with("total"))
         .map(|line| line.trim_matches('"').to_string())
         .collect()
 }
@@ -469,7 +469,7 @@ async fn vmware_list_running(
 $out = & $vmrun -T ws list 2>&1
 $code = $LASTEXITCODE
 if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
 $out
 "#,
         powershell_prelude(),
@@ -546,25 +546,118 @@ async fn vmware_start_vm(
     store: tauri::State<'_, TraceStore>,
     ssh: SshConfig,
     vmx_path: String,
+    vm_password: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
-    let ps = format!(
+    let (ps_exec, ps_log) = if let Some(vm_password) = vm_password {
+        let pw_quoted = ps_single_quote_escape(&vm_password);
+        (
+            format!(
+                r#"
+{prelude}
+{locator}
+$vmx = '{vmx}'
+$vmPassword = '{pw}'
+$args = @('-T', 'ws', '-vp', $vmPassword, 'start', $vmx, 'nogui')
+$out = & $vmrun @args 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{
+  if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
+  exit $code
+}}
+Start-Sleep -Milliseconds 600
+$listOut = & $vmrun -T ws list 2>&1
+
+$running=@()
+foreach($line in ($listOut -split \"`n\")) {{
+  if ($null -eq $line) {{ continue }}
+  $t = $line.Trim().TrimEnd(\"`r\").Trim('\"')
+  if (-not $t) {{ continue }}
+  if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
+  $running += $t
+}}
+
+$isRunning = $false
+foreach($p in $running) {{
+  if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+}}
+
+if (-not $isRunning) {{
+  if ($out) {{ $out }} else {{ 'vmrun start returned success but VM is not running' }}
+  $listOut
+  exit 2
+}}
+$out
+"#,
+                prelude = powershell_prelude(),
+                locator = vmrun_locator_ps(),
+                vmx = vmx_quoted,
+                pw = pw_quoted
+            ),
+            format!(
+                r#"
+{prelude}
+{locator}
+$vmx = '{vmx}'
+$vmPassword = '[REDACTED]'
+$args = @('-T', 'ws', '-vp', $vmPassword, 'start', $vmx, 'nogui')
+$out = & $vmrun @args 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{
+  if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
+  exit $code
+}}
+Start-Sleep -Milliseconds 600
+$listOut = & $vmrun -T ws list 2>&1
+
+$running=@()
+foreach($line in ($listOut -split \"`n\")) {{
+  if ($null -eq $line) {{ continue }}
+  $t = $line.Trim().TrimEnd(\"`r\").Trim('\"')
+  if (-not $t) {{ continue }}
+  if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
+  $running += $t
+}}
+
+$isRunning = $false
+foreach($p in $running) {{
+  if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+}}
+
+if (-not $isRunning) {{
+  if ($out) {{ $out }} else {{ 'vmrun start returned success but VM is not running' }}
+  $listOut
+  exit 2
+}}
+$out
+"#,
+                prelude = powershell_prelude(),
+                locator = vmrun_locator_ps(),
+                vmx = vmx_quoted
+            ),
+        )
+    } else {
+        let ps = format!(
         r#"
 {}
 {}
 $out = & $vmrun -T ws start '{}' nogui 2>&1
 $code = $LASTEXITCODE
 if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
 $out
 "#,
-        powershell_prelude(),
-        vmrun_locator_ps(),
-        vmx_quoted
-    );
-    let exec_command = powershell_encoded(&ps);
+            powershell_prelude(),
+            vmrun_locator_ps(),
+            vmx_quoted
+        );
+        (ps.clone(), ps)
+    };
+    let exec_command = powershell_encoded(&ps_exec);
     let started = Instant::now();
     let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
@@ -576,7 +669,7 @@ $out
         action: "vmware_start_vm".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(ps.trim(), 16 * 1024),
+        command: truncate_text(ps_log.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -602,27 +695,73 @@ async fn vmware_stop_vm(
     ssh: SshConfig,
     vmx_path: String,
     mode: Option<VmStopMode>,
+    vm_password: Option<String>,
     request_id: Option<String>,
 ) -> Result<String, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
     let mode = mode.unwrap_or(VmStopMode::Soft);
-    let ps = format!(
+    let mode_str = mode.as_str();
+    let (ps_exec, ps_log) = if let Some(vm_password) = vm_password {
+        let pw_quoted = ps_single_quote_escape(&vm_password);
+        (
+            format!(
+                r#"
+{prelude}
+{locator}
+$vmx = '{vmx}'
+$vmPassword = '{pw}'
+$args = @('-T', 'ws', '-vp', $vmPassword, 'stop', $vmx, '{mode}')
+$out = & $vmrun @args 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
+$out
+"#,
+                prelude = powershell_prelude(),
+                locator = vmrun_locator_ps(),
+                vmx = vmx_quoted,
+                pw = pw_quoted,
+                mode = mode_str
+            ),
+            format!(
+                r#"
+{prelude}
+{locator}
+$vmx = '{vmx}'
+$vmPassword = '[REDACTED]'
+$args = @('-T', 'ws', '-vp', $vmPassword, 'stop', $vmx, '{mode}')
+$out = & $vmrun @args 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
+$out
+"#,
+                prelude = powershell_prelude(),
+                locator = vmrun_locator_ps(),
+                vmx = vmx_quoted,
+                mode = mode_str
+            ),
+        )
+    } else {
+        let ps = format!(
         r#"
 {}
 {}
 $out = & $vmrun -T ws stop '{}' {} 2>&1
 $code = $LASTEXITCODE
 if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
 $out
 "#,
         powershell_prelude(),
         vmrun_locator_ps(),
         vmx_quoted,
-        mode.as_str()
+        mode_str
     );
-    let exec_command = powershell_encoded(&ps);
+        (ps.clone(), ps)
+    };
+    let exec_command = powershell_encoded(&ps_exec);
     let started = Instant::now();
     let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
@@ -634,7 +773,7 @@ $out
         action: "vmware_stop_vm".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(ps.trim(), 16 * 1024),
+        command: truncate_text(ps_log.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None

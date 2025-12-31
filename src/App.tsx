@@ -74,6 +74,7 @@ export default function App() {
   const [sshKeyPresent, setSshKeyPresent] = useState<boolean | null>(null);
   const [sshKeyError, setSshKeyError] = useState("");
   const [isKeyWorking, setIsKeyWorking] = useState(false);
+  const [vmPassword, setVmPassword] = useState<string>("");
 
   const [runningVmxPaths, setRunningVmxPaths] = useState<string[]>([]);
   const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(null);
@@ -288,10 +289,14 @@ export default function App() {
     setActionText("启动中…");
     setGlobalError("");
     try {
-      await withLog("start_vm", (requestId) => tauri.vmwareStartVm(ssh, vm.vmxPath, requestId), {
+      await withLog(
+        "start_vm",
+        (requestId) => tauri.vmwareStartVmWithPassword(ssh, vm.vmxPath, vmPassword || undefined, requestId),
+        {
         summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
         meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath) },
-      });
+        },
+      );
       pushToast({ kind: "success", title: "已启动", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
@@ -308,10 +313,14 @@ export default function App() {
     setActionText(mode === "hard" ? "硬关机中…" : "软关机中…");
     setGlobalError("");
     try {
-      await withLog("stop_vm", (requestId) => tauri.vmwareStopVm(ssh, vm.vmxPath, mode, requestId), {
+      await withLog(
+        "stop_vm",
+        (requestId) => tauri.vmwareStopVm(ssh, vm.vmxPath, mode, requestId, vmPassword || undefined),
+        {
         summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
         meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath), mode: summarizeStopMode(mode) },
-      });
+        },
+      );
       pushToast({ kind: "success", title: "已停止", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
@@ -442,6 +451,8 @@ export default function App() {
             isKeyWorking={isKeyWorking}
             onUploadKeyText={(text) => void uploadSshKeyText(text)}
             onClearKey={() => void clearSshKey()}
+            vmPassword={vmPassword}
+            onChangeVmPassword={setVmPassword}
             scanRoots={scanRoots}
             onSetScanRoots={setScanRoots}
             diagCommand={diagCommand}
