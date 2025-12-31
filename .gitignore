@@ -23,6 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 
+tmp
+
 # Sensitive keys (do not commit)
 src-tauri/resources/mypc
 src-tauri/resources/*.key

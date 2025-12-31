@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use russh::client;
 use russh::keys::{decode_secret_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
+use base64::Engine as _;
 use serde::Deserialize;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -24,6 +25,18 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
     let head = &text[..max_len.saturating_sub(1)];
     format!("{head}…")
+}
+
+fn powershell_encoded(script: &str) -> String {
+    let trimmed = script.trim();
+    let mut utf16le = Vec::with_capacity(trimmed.len().saturating_mul(2));
+    for unit in trimmed.encode_utf16() {
+        utf16le.extend_from_slice(&unit.to_le_bytes());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
+    format!(
+        "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+    )
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -371,7 +384,25 @@ fn parse_json_string_array(output: &str) -> Result<Vec<String>, String> {
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-    serde_json::from_str::<Vec<String>>(trimmed).map_err(|err| format!("{err:?}"))
+
+    let candidate = trimmed
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+        .unwrap_or(trimmed);
+
+    if let Ok(list) = serde_json::from_str::<Vec<String>>(candidate) {
+        return Ok(list);
+    }
+
+    if let Ok(single) = serde_json::from_str::<String>(candidate) {
+        return Ok(vec![single]);
+    }
+
+    Err(format!(
+        "Failed to parse JSON array from output (first line: {})",
+        truncate_text(candidate, 240)
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -579,6 +610,7 @@ async fn vmware_scan_default_vmx(
 ) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let ps = r#"
+$ProgressPreference = 'SilentlyContinue'
 $roots=@()
 if($env:USERPROFILE){ $roots += (Join-Path $env:USERPROFILE 'Documents\Virtual Machines') }
 if($env:PUBLIC){ $roots += (Join-Path $env:PUBLIC 'Documents\Shared Virtual Machines') }
@@ -592,12 +624,9 @@ foreach($root in $roots){
 }
 
 $paths = $paths | Sort-Object -Unique | Select-Object -First 500
-$paths | ConvertTo-Json -Compress
+@($paths) | ConvertTo-Json -Compress
 "#;
-    let command = format!(
-        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
-        ps.replace('"', r#"""""#).trim()
-    );
+    let command = powershell_encoded(ps);
     let started = Instant::now();
     let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
@@ -644,6 +673,7 @@ async fn vmware_scan_vmx(
 
     let ps = format!(
         r#"
+$ProgressPreference = 'SilentlyContinue'
 $inputRoots = '{roots_json}' | ConvertFrom-Json
 $roots=@()
 foreach($r in $inputRoots){{
@@ -669,14 +699,11 @@ foreach($root in $expanded){{
 }}
 
 $paths = $paths | Sort-Object -Unique | Select-Object -First 500
-$paths | ConvertTo-Json -Compress
+@($paths) | ConvertTo-Json -Compress
 "#
     );
 
-    let command = format!(
-        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
-        ps.replace('"', r#"""""#).trim()
-    );
+    let command = powershell_encoded(&ps);
     let started = Instant::now();
     let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;

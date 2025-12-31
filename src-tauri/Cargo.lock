@@ -4813,6 +4813,7 @@ dependencies = [
 name = "tauri-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "encoding_rs",
  "russh",
  "serde",
