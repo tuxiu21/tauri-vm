@@ -27,6 +27,18 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     format!("{head}…")
 }
 
+fn format_exit_status(status: u32) -> String {
+    if status > i32::MAX as u32 {
+        format!("{status} ({})", status as i32)
+    } else {
+        status.to_string()
+    }
+}
+
+fn remote_exit_error(status: u32) -> String {
+    format!("Remote command exited with status {}", format_exit_status(status))
+}
+
 fn powershell_encoded(script: &str) -> String {
     let trimmed = script.trim();
     let mut utf16le = Vec::with_capacity(trimmed.len().saturating_mul(2));
@@ -37,6 +49,10 @@ fn powershell_encoded(script: &str) -> String {
     format!(
         "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}"
     )
+}
+
+fn powershell_prelude() -> &'static str {
+    r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()"#
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,10 +109,6 @@ fn trace_clear(store: tauri::State<'_, TraceStore>) {
 fn decode_remote_output(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
 
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_string();
-    }
-
     if bytes.len() >= 2 {
         if bytes.starts_with(&[0xFF, 0xFE]) && (bytes.len() % 2 == 0) {
             let u16s: Vec<u16> = bytes[2..]
@@ -114,8 +126,44 @@ fn decode_remote_output(bytes: &[u8]) -> String {
         }
     }
 
-    let (text, _, _) = encoding_rs::GBK.decode(bytes);
-    text.into_owned()
+    let (gbk_text, _, gbk_had_errors) = encoding_rs::GBK.decode(bytes);
+
+    if let Ok(utf8_text) = std::str::from_utf8(bytes) {
+        fn score_cjk(s: &str) -> usize {
+            s.chars()
+                .filter(|ch| {
+                    matches!(
+                        *ch as u32,
+                        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
+                    )
+                })
+                .count()
+        }
+
+        fn score_mojibake(s: &str) -> usize {
+            s.chars()
+                .filter(|ch| matches!(*ch as u32, 0x00C0..=0x00FF) || *ch == '�')
+                .count()
+        }
+
+        let utf8 = utf8_text;
+        let gbk = gbk_text.as_ref();
+
+        let utf8_cjk = score_cjk(utf8);
+        let gbk_cjk = score_cjk(gbk);
+        let utf8_moji = score_mojibake(utf8);
+        let gbk_moji = score_mojibake(gbk);
+
+        if !gbk_had_errors
+            && (gbk_cjk > utf8_cjk.saturating_add(2) || utf8_moji > gbk_moji.saturating_add(4))
+        {
+            return gbk.to_string();
+        }
+
+        return utf8.to_string();
+    }
+
+    gbk_text.into_owned()
 }
 
 struct Client;
@@ -193,9 +241,7 @@ impl SshSession {
             match msg {
                 ChannelMsg::Data { data } => output.extend_from_slice(data.as_ref()),
                 ChannelMsg::ExtendedData { data, .. } => output.extend_from_slice(data.as_ref()),
-                ChannelMsg::ExitStatus {
-                    exit_status: status,
-                } => exit_status = Some(status),
+                ChannelMsg::ExitStatus { exit_status: status } => exit_status = Some(status),
                 _ => {}
             }
         }
@@ -213,7 +259,7 @@ impl SshSession {
             if status != 0 {
                 let trimmed = res.output.trim();
                 if trimmed.is_empty() {
-                    return Err(format!("Remote command exited with status {status}"));
+                    return Err(remote_exit_error(status));
                 }
                 return Err(trimmed.to_string());
             }
@@ -352,10 +398,7 @@ async fn ssh_exec(
     if ok {
         Ok(res.output)
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
@@ -420,15 +463,21 @@ async fn vmware_list_running(
 ) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let ps = format!(
-        r#"& {{ {} ; $out = & $vmrun -T ws list 2>&1; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; $out }}"#,
+        r#"
+{}
+{}
+$out = & $vmrun -T ws list 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+$out
+"#,
+        powershell_prelude(),
         vmrun_locator_ps()
     );
-    let command = format!(
-        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
-        ps.replace('"', r#"""""#)
-    );
+    let exec_command = powershell_encoded(&ps);
     let started = Instant::now();
-    let res = session.exec_collect_full(&command).await?;
+    let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
 
     let ok = res.exit_status.unwrap_or(0) == 0;
@@ -438,7 +487,7 @@ async fn vmware_list_running(
         action: "vmware_list_running".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(&command, 16 * 1024),
+        command: truncate_text(ps.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -451,10 +500,7 @@ async fn vmware_list_running(
     if ok {
         Ok(parse_vmrun_list_output(&res.output))
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
@@ -505,16 +551,22 @@ async fn vmware_start_vm(
     let mut session = ssh_connect(&app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
     let ps = format!(
-        r#"& {{ {} ; $out = & $vmrun -T ws start '{}' nogui 2>&1; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; $out }}"#,
+        r#"
+{}
+{}
+$out = & $vmrun -T ws start '{}' nogui 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+$out
+"#,
+        powershell_prelude(),
         vmrun_locator_ps(),
         vmx_quoted
     );
-    let command = format!(
-        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
-        ps.replace('"', r#"""""#)
-    );
+    let exec_command = powershell_encoded(&ps);
     let started = Instant::now();
-    let res = session.exec_collect_full(&command).await?;
+    let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
 
     let ok = res.exit_status.unwrap_or(0) == 0;
@@ -524,7 +576,7 @@ async fn vmware_start_vm(
         action: "vmware_start_vm".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(&command, 16 * 1024),
+        command: truncate_text(ps.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -537,10 +589,7 @@ async fn vmware_start_vm(
     if ok {
         Ok(res.output)
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
@@ -559,17 +608,23 @@ async fn vmware_stop_vm(
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
     let mode = mode.unwrap_or(VmStopMode::Soft);
     let ps = format!(
-        r#"& {{ {} ; $out = & $vmrun -T ws stop '{}' {} 2>&1; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; $out }}"#,
+        r#"
+{}
+{}
+$out = & $vmrun -T ws stop '{}' {} 2>&1
+$code = $LASTEXITCODE
+if ($null -eq $code) {{ $code = 1 }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ \"vmrun failed with exit code $code\" }}; exit $code }}
+$out
+"#,
+        powershell_prelude(),
         vmrun_locator_ps(),
         vmx_quoted,
         mode.as_str()
     );
-    let command = format!(
-        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
-        ps.replace('"', r#"""""#)
-    );
+    let exec_command = powershell_encoded(&ps);
     let started = Instant::now();
-    let res = session.exec_collect_full(&command).await?;
+    let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
 
     let ok = res.exit_status.unwrap_or(0) == 0;
@@ -579,7 +634,7 @@ async fn vmware_stop_vm(
         action: "vmware_stop_vm".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(&command, 16 * 1024),
+        command: truncate_text(ps.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -592,10 +647,7 @@ async fn vmware_stop_vm(
     if ok {
         Ok(res.output)
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
@@ -610,6 +662,7 @@ async fn vmware_scan_default_vmx(
 ) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let ps = r#"
+$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
 $ProgressPreference = 'SilentlyContinue'
 $roots=@()
 if($env:USERPROFILE){ $roots += (Join-Path $env:USERPROFILE 'Documents\Virtual Machines') }
@@ -626,9 +679,9 @@ foreach($root in $roots){
 $paths = $paths | Sort-Object -Unique | Select-Object -First 500
 @($paths) | ConvertTo-Json -Compress
 "#;
-    let command = powershell_encoded(ps);
+    let exec_command = powershell_encoded(ps);
     let started = Instant::now();
-    let res = session.exec_collect_full(&command).await?;
+    let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
 
     let ok = res.exit_status.unwrap_or(0) == 0;
@@ -638,7 +691,7 @@ $paths = $paths | Sort-Object -Unique | Select-Object -First 500
         action: "vmware_scan_default_vmx".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(&command, 16 * 1024),
+        command: truncate_text(ps.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -651,10 +704,7 @@ $paths = $paths | Sort-Object -Unique | Select-Object -First 500
     if ok {
         parse_json_string_array(&res.output)
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
@@ -673,6 +723,7 @@ async fn vmware_scan_vmx(
 
     let ps = format!(
         r#"
+$OutputEncoding=[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
 $ProgressPreference = 'SilentlyContinue'
 $inputRoots = '{roots_json}' | ConvertFrom-Json
 $roots=@()
@@ -703,9 +754,9 @@ $paths = $paths | Sort-Object -Unique | Select-Object -First 500
 "#
     );
 
-    let command = powershell_encoded(&ps);
+    let exec_command = powershell_encoded(&ps);
     let started = Instant::now();
-    let res = session.exec_collect_full(&command).await?;
+    let res = session.exec_collect_full(&exec_command).await?;
     let _ = session.close().await;
 
     let ok = res.exit_status.unwrap_or(0) == 0;
@@ -715,7 +766,7 @@ $paths = $paths | Sort-Object -Unique | Select-Object -First 500
         action: "vmware_scan_vmx".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(&command, 16 * 1024),
+        command: truncate_text(ps.trim(), 16 * 1024),
         output: truncate_text(&res.output, 64 * 1024),
         error: if ok {
             None
@@ -728,10 +779,7 @@ $paths = $paths | Sort-Object -Unique | Select-Object -First 500
     if ok {
         parse_json_string_array(&res.output)
     } else if res.output.trim().is_empty() {
-        Err(format!(
-            "Remote command exited with status {}",
-            res.exit_status.unwrap_or(1)
-        ))
+        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
     } else {
         Err(res.output.trim().to_string())
     }
