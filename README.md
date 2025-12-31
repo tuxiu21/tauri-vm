@@ -20,3 +20,7 @@
 
 - 前端类型检查：`pnpm exec tsc --noEmit`
 - Rust 检查：`cd src-tauri; cargo check`
+
+## 样式
+
+- 使用 Tailwind CSS（入口：`src/App.css`；配置：`tailwind.config.cjs` / `postcss.config.cjs`）。
