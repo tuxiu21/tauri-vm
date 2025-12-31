@@ -251,6 +251,14 @@ fn parse_vmrun_list_output(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_json_string_array(output: &str) -> Result<Vec<String>, String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str::<Vec<String>>(trimmed).map_err(|err| format!("{err:?}"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VmItem {
     vmx_path: String,
@@ -352,6 +360,79 @@ async fn vmware_stop_vm(
     Ok(output)
 }
 
+#[tauri::command]
+async fn vmware_scan_default_vmx(app: AppHandle, ssh: SshConfig) -> Result<Vec<String>, String> {
+    let mut session = ssh_connect(&app, &ssh).await?;
+    let ps = r#"
+$roots=@()
+if($env:USERPROFILE){ $roots += (Join-Path $env:USERPROFILE 'Documents\Virtual Machines') }
+if($env:PUBLIC){ $roots += (Join-Path $env:PUBLIC 'Documents\Shared Virtual Machines') }
+$roots = $roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+
+$paths=@()
+foreach($root in $roots){
+  $paths += Get-ChildItem -LiteralPath $root -Recurse -File -Filter *.vmx -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -ieq '.vmx' } |
+    Select-Object -ExpandProperty FullName
+}
+
+$paths = $paths | Sort-Object -Unique | Select-Object -First 500
+$paths | ConvertTo-Json -Compress
+"#;
+    let command = format!(
+        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
+        ps.replace('"', r#"""""#).trim()
+    );
+    let output = session.exec_collect(&command).await?;
+    let _ = session.close().await;
+    parse_json_string_array(&output)
+}
+
+#[tauri::command]
+async fn vmware_scan_vmx(app: AppHandle, ssh: SshConfig, roots: Vec<String>) -> Result<Vec<String>, String> {
+    let mut session = ssh_connect(&app, &ssh).await?;
+    let roots_json = serde_json::to_string(&roots).map_err(|err| format!("{err:?}"))?;
+
+    let ps = format!(
+        r#"
+$inputRoots = '{roots_json}' | ConvertFrom-Json
+$roots=@()
+foreach($r in $inputRoots){{
+  if(-not $r){{ continue }}
+  $roots += [string]$r
+}}
+$roots = $roots | Select-Object -Unique
+
+$expanded=@()
+foreach($root in $roots){{
+  $resolved = $ExecutionContext.InvokeCommand.ExpandString($root)
+  if($resolved -and (Test-Path -LiteralPath $resolved)){{
+    $expanded += $resolved
+  }}
+}}
+$expanded = $expanded | Select-Object -Unique
+
+$paths=@()
+foreach($root in $expanded){{
+  $paths += Get-ChildItem -LiteralPath $root -Recurse -File -Filter *.vmx -ErrorAction SilentlyContinue |
+    Where-Object {{ $_.Extension -ieq '.vmx' }} |
+    Select-Object -ExpandProperty FullName
+}}
+
+$paths = $paths | Sort-Object -Unique | Select-Object -First 500
+$paths | ConvertTo-Json -Compress
+"#
+    );
+
+    let command = format!(
+        r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
+        ps.replace('"', r#"""""#).trim()
+    );
+    let output = session.exec_collect(&command).await?;
+    let _ = session.close().await;
+    parse_json_string_array(&output)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -366,7 +447,9 @@ pub fn run() {
             vmware_list_running,
             vmware_status_for_known,
             vmware_start_vm,
-            vmware_stop_vm
+            vmware_stop_vm,
+            vmware_scan_default_vmx,
+            vmware_scan_vmx
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
