@@ -91,8 +91,8 @@ export function ConsolePage(props: {
   return (
     <div className="flex flex-col gap-4">
       <section className={`relative overflow-hidden p-5 ${ui.cardStrong}`}>
-        <div className="absolute -right-28 -top-28 h-64 w-64 rounded-full bg-gradient-to-br from-indigo-500/30 via-fuchsia-500/20 to-sky-500/20 blur-2xl" />
-        <div className="absolute -left-28 -bottom-28 h-64 w-64 rounded-full bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-emerald-500/15 blur-2xl" />
+        <div className="absolute -right-28 -top-28 h-64 w-64 rounded-full bg-gradient-to-br from-indigo-500/30 via-fuchsia-500/20 to-sky-500/20 blur-2xl dark:opacity-60" />
+        <div className="absolute -left-28 -bottom-28 h-64 w-64 rounded-full bg-gradient-to-br from-sky-500/20 via-indigo-500/20 to-emerald-500/15 blur-2xl dark:opacity-60" />
 
         <div className="relative">
           <div className="flex flex-wrap items-start justify-between gap-4">
@@ -207,7 +207,7 @@ export function ConsolePage(props: {
 
         {filter === "unknown" ? (
           props.unknownRunning.length ? (
-            <div className="mt-4 rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-400/20 dark:bg-white/5">
+            <div className="mt-4 rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
               <p className={`m-0 ${ui.muted}`}>这些虚拟机正在运行，但尚未导入到列表。</p>
               <ul className="mt-2.5 list-disc pl-5">
                 {props.unknownRunning.map((p) => (
@@ -296,7 +296,7 @@ export function ConsolePage(props: {
             ))}
           </ul>
         ) : (
-          <div className="mt-4 rounded-2xl border border-slate-900/10 bg-white/60 p-4 dark:border-slate-400/20 dark:bg-white/5">
+          <div className="mt-4 rounded-2xl border border-slate-900/10 bg-white/60 p-4 dark:border-slate-700/60 dark:bg-slate-900/60">
             <p className="m-0 font-semibold">还没有导入虚拟机</p>
             <p className={`m-0 mt-1 ${ui.muted}`}>推荐先扫描目录导入（可在设置中自定义扫描路径）。</p>
             <div className="mt-3 flex flex-wrap gap-2.5">
@@ -345,7 +345,7 @@ export function ConsolePage(props: {
 
       {stopConfirmVm ? (
         <Modal title="停止虚拟机" description="默认推荐软关机；如果卡住再使用硬关机。" onClose={() => setStopConfirmVm(null)}>
-          <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-400/20 dark:bg-white/5">
+          <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
             <p className="m-0 font-semibold">{stopConfirmVm.displayName}</p>
             <p className={`m-0 mt-1 break-words font-mono text-sm ${ui.muted}`}>{stopConfirmVm.vmxPath}</p>
           </div>
@@ -381,4 +381,3 @@ export function ConsolePage(props: {
     </div>
   );
 }
-

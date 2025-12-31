@@ -155,7 +155,7 @@ export function SettingsPage(props: {
               {props.scanRoots.map((root) => (
                 <li
                   key={root}
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-900/10 bg-white/60 px-3 py-2 dark:border-slate-400/20 dark:bg-white/5"
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-900/10 bg-white/60 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/60"
                 >
                   <code className="break-all text-sm">{root}</code>
                   <button
@@ -218,11 +218,10 @@ export function SettingsPage(props: {
           {props.diagError ? <p className="m-0 font-semibold text-rose-700 dark:text-rose-200">{props.diagError}</p> : null}
         </div>
 
-        <pre className="mt-3 min-h-[220px] w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm dark:border-slate-400/20 dark:bg-white/5">
+        <pre className="mt-3 min-h-[220px] w-full max-w-full overflow-auto whitespace-pre-wrap break-words rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm dark:border-slate-700/60 dark:bg-slate-900/60">
           {props.diagOutput || "等待输出…"}
         </pre>
       </details>
     </div>
   );
 }
-

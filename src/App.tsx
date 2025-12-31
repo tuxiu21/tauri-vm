@@ -391,7 +391,7 @@ export default function App() {
             </div>
 
             {scanMode === "custom" ? (
-              <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-400/20 dark:bg-white/5">
+              <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
                 <p className="m-0 font-semibold">扫描目录</p>
                 <p className={`m-0 mt-1 text-sm ${ui.muted}`}>可在设置中维护目录列表。</p>
                 <ul className="m-0 mt-2 list-disc pl-5">
@@ -409,7 +409,7 @@ export default function App() {
               </div>
             ) : (
               <div
-                className={`rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm ${ui.muted} dark:border-slate-400/20 dark:bg-white/5`}
+                className={`rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm ${ui.muted} dark:border-slate-700/60 dark:bg-slate-900/60`}
               >
                 默认目录会扫描用户文档与公共共享 VM 目录。
               </div>
@@ -418,7 +418,7 @@ export default function App() {
             {scanError ? <p className="m-0 font-semibold text-rose-700 dark:text-rose-200">{scanError}</p> : null}
 
             {scanResults.length ? (
-              <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-400/20 dark:bg-white/5">
+              <div className="rounded-2xl border border-slate-900/10 bg-white/60 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="m-0 font-semibold">扫描结果（{scanResults.length}）</p>
                   <div className="flex flex-wrap gap-2">
@@ -443,7 +443,7 @@ export default function App() {
                   {scanResults.map((path) => (
                     <li
                       key={path}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-900/10 bg-white/70 px-3 py-2 dark:border-slate-400/20 dark:bg-white/5"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-slate-900/10 bg-white/70 px-3 py-2 dark:border-slate-700/60 dark:bg-slate-900/60"
                     >
                       <label className="flex min-w-0 items-start gap-2">
                         <input
@@ -465,7 +465,7 @@ export default function App() {
               </div>
             ) : (
               <div
-                className={`rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm ${ui.muted} dark:border-slate-400/20 dark:bg-white/5`}
+                className={`rounded-2xl border border-slate-900/10 bg-white/60 p-3 text-sm ${ui.muted} dark:border-slate-700/60 dark:bg-slate-900/60`}
               >
                 点“开始扫描”获取结果。
               </div>
