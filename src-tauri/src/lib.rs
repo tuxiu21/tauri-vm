@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use russh::client;
 use russh::keys::{decode_secret_key, PrivateKey, PrivateKeyWithHashAlg};
@@ -8,6 +10,72 @@ use serde::Deserialize;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 use tokio::net::ToSocketAddrs;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+    let head = &text[..max_len.saturating_sub(1)];
+    format!("{head}…")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceEntry {
+    id: u64,
+    at: u64,
+    action: String,
+    ok: bool,
+    duration_ms: u64,
+    command: String,
+    output: String,
+    error: Option<String>,
+    request_id: Option<String>,
+}
+
+#[derive(Default)]
+struct TraceStore {
+    next_id: AtomicU64,
+    entries: Mutex<VecDeque<TraceEntry>>,
+}
+
+impl TraceStore {
+    fn push(&self, mut entry: TraceEntry) {
+        entry.id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.entries.lock().expect("trace store poisoned");
+        guard.push_front(entry);
+        while guard.len() > 200 {
+            guard.pop_back();
+        }
+    }
+
+    fn list(&self) -> Vec<TraceEntry> {
+        let guard = self.entries.lock().expect("trace store poisoned");
+        guard.iter().cloned().collect()
+    }
+
+    fn clear(&self) {
+        let mut guard = self.entries.lock().expect("trace store poisoned");
+        guard.clear();
+    }
+}
+
+#[tauri::command]
+fn trace_list(store: tauri::State<'_, TraceStore>) -> Vec<TraceEntry> {
+    store.list()
+}
+
+#[tauri::command]
+fn trace_clear(store: tauri::State<'_, TraceStore>) {
+    store.clear();
+}
 
 fn decode_remote_output(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
@@ -54,6 +122,11 @@ struct SshSession {
     session: client::Handle<Client>,
 }
 
+struct ExecCollected {
+    output: String,
+    exit_status: Option<u32>,
+}
+
 impl SshSession {
     async fn connect<A: ToSocketAddrs>(
         private_key: PrivateKey,
@@ -89,7 +162,7 @@ impl SshSession {
         Ok(Self { session })
     }
 
-    async fn exec_collect(&mut self, command: &str) -> Result<String, String> {
+    async fn exec_collect_full(&mut self, command: &str) -> Result<ExecCollected, String> {
         let mut channel = self
             .session
             .channel_open_session()
@@ -115,9 +188,17 @@ impl SshSession {
         }
 
         let output_text = decode_remote_output(&output);
-        if let Some(status) = exit_status {
+        Ok(ExecCollected {
+            output: output_text,
+            exit_status,
+        })
+    }
+
+    async fn exec_collect(&mut self, command: &str) -> Result<String, String> {
+        let res = self.exec_collect_full(command).await?;
+        if let Some(status) = res.exit_status {
             if status != 0 {
-                let trimmed = output_text.trim();
+                let trimmed = res.output.trim();
                 if trimmed.is_empty() {
                     return Err(format!("Remote command exited with status {status}"));
                 }
@@ -125,7 +206,7 @@ impl SshSession {
             }
         }
 
-        Ok(output_text)
+        Ok(res.output)
     }
 
     async fn close(&mut self) -> Result<(), String> {
@@ -222,15 +303,49 @@ async fn ssh_dir(app: AppHandle, ssh: SshConfig) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn ssh_exec(app: AppHandle, ssh: SshConfig, command: String) -> Result<String, String> {
+async fn ssh_exec(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    command: String,
+    request_id: Option<String>,
+) -> Result<String, String> {
     if command.len() > 8192 {
         return Err("Command too long".to_string());
     }
 
     let mut session = ssh_connect(&app, &ssh).await?;
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    Ok(output)
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "ssh_exec".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        Ok(res.output)
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 fn ps_single_quote_escape(text: &str) -> String {
@@ -266,7 +381,12 @@ struct VmItem {
 }
 
 #[tauri::command]
-async fn vmware_list_running(app: AppHandle, ssh: SshConfig) -> Result<Vec<String>, String> {
+async fn vmware_list_running(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    request_id: Option<String>,
+) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let ps = format!(
         r#"& {{ {} ; $out = & $vmrun -T ws list 2>&1; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; $out }}"#,
@@ -276,18 +396,48 @@ async fn vmware_list_running(app: AppHandle, ssh: SshConfig) -> Result<Vec<Strin
         r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
         ps.replace('"', r#"""""#)
     );
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    Ok(parse_vmrun_list_output(&output))
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "vmware_list_running".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        Ok(parse_vmrun_list_output(&res.output))
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 #[tauri::command]
 async fn vmware_status_for_known(
     app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
     ssh: SshConfig,
     known_vmx_paths: Vec<String>,
+    request_id: Option<String>,
 ) -> Result<Vec<VmItem>, String> {
-    let running = vmware_list_running(app, ssh).await?;
+    let running = vmware_list_running(app, store, ssh, request_id).await?;
     Ok(known_vmx_paths
         .into_iter()
         .map(|vmx_path| VmItem {
@@ -316,8 +466,10 @@ impl VmStopMode {
 #[tauri::command]
 async fn vmware_start_vm(
     app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
     ssh: SshConfig,
     vmx_path: String,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
@@ -330,17 +482,47 @@ async fn vmware_start_vm(
         r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
         ps.replace('"', r#"""""#)
     );
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    Ok(output)
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "vmware_start_vm".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        Ok(res.output)
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 #[tauri::command]
 async fn vmware_stop_vm(
     app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
     ssh: SshConfig,
     vmx_path: String,
     mode: Option<VmStopMode>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
@@ -355,13 +537,46 @@ async fn vmware_stop_vm(
         r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
         ps.replace('"', r#"""""#)
     );
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    Ok(output)
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "vmware_stop_vm".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        Ok(res.output)
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 #[tauri::command]
-async fn vmware_scan_default_vmx(app: AppHandle, ssh: SshConfig) -> Result<Vec<String>, String> {
+async fn vmware_scan_default_vmx(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    request_id: Option<String>,
+) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let ps = r#"
 $roots=@()
@@ -383,13 +598,47 @@ $paths | ConvertTo-Json -Compress
         r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
         ps.replace('"', r#"""""#).trim()
     );
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    parse_json_string_array(&output)
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "vmware_scan_default_vmx".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        parse_json_string_array(&res.output)
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 #[tauri::command]
-async fn vmware_scan_vmx(app: AppHandle, ssh: SshConfig, roots: Vec<String>) -> Result<Vec<String>, String> {
+async fn vmware_scan_vmx(
+    app: AppHandle,
+    store: tauri::State<'_, TraceStore>,
+    ssh: SshConfig,
+    roots: Vec<String>,
+    request_id: Option<String>,
+) -> Result<Vec<String>, String> {
     let mut session = ssh_connect(&app, &ssh).await?;
     let roots_json = serde_json::to_string(&roots).map_err(|err| format!("{err:?}"))?;
 
@@ -428,17 +677,48 @@ $paths | ConvertTo-Json -Compress
         r#"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "{}""#,
         ps.replace('"', r#"""""#).trim()
     );
-    let output = session.exec_collect(&command).await?;
+    let started = Instant::now();
+    let res = session.exec_collect_full(&command).await?;
     let _ = session.close().await;
-    parse_json_string_array(&output)
+
+    let ok = res.exit_status.unwrap_or(0) == 0;
+    store.push(TraceEntry {
+        id: 0,
+        at: now_ms(),
+        action: "vmware_scan_vmx".to_string(),
+        ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+        command: truncate_text(&command, 16 * 1024),
+        output: truncate_text(&res.output, 64 * 1024),
+        error: if ok {
+            None
+        } else {
+            Some(truncate_text(res.output.trim(), 8 * 1024))
+        },
+        request_id,
+    });
+
+    if ok {
+        parse_json_string_array(&res.output)
+    } else if res.output.trim().is_empty() {
+        Err(format!(
+            "Remote command exited with status {}",
+            res.exit_status.unwrap_or(1)
+        ))
+    } else {
+        Err(res.output.trim().to_string())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(TraceStore::default())
         .invoke_handler(tauri::generate_handler![
             greet,
+            trace_list,
+            trace_clear,
             ssh_key_status,
             ssh_set_private_key,
             ssh_clear_private_key,

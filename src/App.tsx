@@ -6,6 +6,8 @@ import { readLocalStorageJson, writeLocalStorageJson, newId } from "./app/storag
 import { useHashRoute } from "./app/useHashRoute";
 import * as tauri from "./app/tauri";
 import { guessVmNameFromVmxPath } from "./app/vmName";
+import type { LogAction, LogEvent } from "./app/log";
+import { summarizeSsh, summarizeStopMode, summarizeVmxPath } from "./app/log";
 import { ui } from "./components/ui";
 import { ToastViewport } from "./components/ToastViewport";
 import { Modal } from "./components/Modal";
@@ -18,6 +20,7 @@ const LS = {
   knownVmsLegacy: "vmware.knownVms",
   scanRoots: "vmware.scanRoots",
   diagCommand: "diag.command",
+  opLog: "vmware.opLog.v1",
 };
 
 function defaultSsh(): SshConfig {
@@ -81,6 +84,9 @@ export default function App() {
   const [actionText, setActionText] = useState<string>("");
 
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [opLog, setOpLog] = useState<LogEvent[]>(() => readLocalStorageJson<LogEvent[]>(LS.opLog, []));
+  const [traces, setTraces] = useState<tauri.TraceEntry[]>([]);
+  const [isTracesLoading, setIsTracesLoading] = useState(false);
 
   const [scanWizardOpen, setScanWizardOpen] = useState(false);
   const [scanMode, setScanMode] = useState<"custom" | "default">("custom");
@@ -103,6 +109,7 @@ export default function App() {
   useEffect(() => writeLocalStorageJson(LS.knownVms, knownVms), [knownVms]);
   useEffect(() => writeLocalStorageJson(LS.scanRoots, scanRoots), [scanRoots]);
   useEffect(() => writeLocalStorageJson(LS.diagCommand, diagCommand), [diagCommand]);
+  useEffect(() => writeLocalStorageJson(LS.opLog, opLog), [opLog]);
 
   function pushToast(toast: Omit<Toast, "id">) {
     setToasts((prev) => [{ id: newId(), ...toast }, ...prev].slice(0, 3));
@@ -112,10 +119,50 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
+  function pushLog(entry: Omit<LogEvent, "id" | "at">) {
+    setOpLog((prev) => [{ id: newId(), at: Date.now(), ...entry }, ...prev].slice(0, 200));
+  }
+
+  async function withLog<T>(
+    action: LogAction,
+    fn: (requestId: string) => Promise<T>,
+    opts?: { summary?: string; meta?: Record<string, unknown> },
+  ): Promise<T> {
+    const requestId = newId();
+    const started = performance.now();
+    try {
+      const result = await fn(requestId);
+      const durationMs = Math.round(performance.now() - started);
+      pushLog({
+        action,
+        status: "success",
+        durationMs,
+        summary: opts?.summary,
+        meta: opts?.meta,
+        requestId,
+      });
+      return result;
+    } catch (err) {
+      const durationMs = Math.round(performance.now() - started);
+      pushLog({
+        action,
+        status: "error",
+        durationMs,
+        summary: opts?.summary,
+        error: String(err),
+        meta: opts?.meta,
+        requestId,
+      });
+      throw err;
+    }
+  }
+
   async function refreshKeyStatus() {
     setSshKeyError("");
     try {
-      const present = await tauri.sshKeyStatus();
+      const present = await withLog("refresh_key_status", () => tauri.sshKeyStatus(), {
+        meta: { ssh: summarizeSsh(ssh) },
+      });
       setSshKeyPresent(present);
     } catch (err) {
       setSshKeyPresent(false);
@@ -123,11 +170,29 @@ export default function App() {
     }
   }
 
+  async function refreshTraces() {
+    setIsTracesLoading(true);
+    try {
+      const list = await tauri.traceList();
+      setTraces(list);
+    } finally {
+      setIsTracesLoading(false);
+    }
+  }
+
+  async function clearTraces() {
+    await tauri.traceClear();
+    await refreshTraces();
+  }
+
   async function refresh() {
     setIsRefreshing(true);
     setGlobalError("");
     try {
-      const running = await tauri.vmwareListRunning(ssh);
+      const running = await withLog("refresh_running", (requestId) => tauri.vmwareListRunning(ssh, requestId), {
+        summary: "List running VMs",
+        meta: { ssh: summarizeSsh(ssh) },
+      });
       setRunningVmxPaths(running);
       setLastRefreshAt(Date.now());
     } catch (err) {
@@ -140,7 +205,11 @@ export default function App() {
   async function testConnection() {
     setGlobalError("");
     try {
-      const out = await tauri.sshExec(ssh, 'powershell -NoProfile -NonInteractive -Command "hostname"');
+      const out = await withLog("test_connection", (requestId) =>
+        tauri.sshExec(ssh, 'powershell -NoProfile -NonInteractive -Command "hostname"', requestId), {
+          summary: "hostname",
+          meta: { ssh: summarizeSsh(ssh) },
+        });
       pushToast({ kind: "success", title: "连接正常", message: out.trim() || "OK" });
     } catch (err) {
       setGlobalError(String(err));
@@ -152,7 +221,10 @@ export default function App() {
     setIsKeyWorking(true);
     setSshKeyError("");
     try {
-      await tauri.sshSetPrivateKey(keyText);
+      await withLog("upload_key", () => tauri.sshSetPrivateKey(keyText), {
+        summary: "Upload SSH private key",
+        meta: { keySize: keyText.length },
+      });
       setSshKeyPresent(true);
       pushToast({ kind: "success", title: "私钥已保存" });
     } catch (err) {
@@ -168,7 +240,7 @@ export default function App() {
     setIsKeyWorking(true);
     setSshKeyError("");
     try {
-      await tauri.sshClearPrivateKey();
+      await withLog("clear_key", () => tauri.sshClearPrivateKey(), { summary: "Clear SSH private key" });
       setSshKeyPresent(false);
       pushToast({ kind: "success", title: "已清除私钥" });
     } catch (err) {
@@ -182,6 +254,12 @@ export default function App() {
   function addVmByPath(vmxPath: string) {
     const trimmed = vmxPath.trim();
     if (!trimmed) return;
+    pushLog({
+      action: "add_vm_manual",
+      status: "success",
+      summary: "Add VM manually",
+      meta: { vmxPath: summarizeVmxPath(trimmed) },
+    });
     setKnownVms((prev) =>
       normalizeKnownVms([
         ...prev,
@@ -210,7 +288,10 @@ export default function App() {
     setActionText("启动中…");
     setGlobalError("");
     try {
-      await tauri.vmwareStartVm(ssh, vm.vmxPath);
+      await withLog("start_vm", (requestId) => tauri.vmwareStartVm(ssh, vm.vmxPath, requestId), {
+        summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath) },
+      });
       pushToast({ kind: "success", title: "已启动", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
@@ -227,7 +308,10 @@ export default function App() {
     setActionText(mode === "hard" ? "硬关机中…" : "软关机中…");
     setGlobalError("");
     try {
-      await tauri.vmwareStopVm(ssh, vm.vmxPath, mode);
+      await withLog("stop_vm", (requestId) => tauri.vmwareStopVm(ssh, vm.vmxPath, mode, requestId), {
+        summary: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath),
+        meta: { ssh: summarizeSsh(ssh), vmxPath: summarizeVmxPath(vm.vmxPath), mode: summarizeStopMode(mode) },
+      });
       pushToast({ kind: "success", title: "已停止", message: vm.nameOverride || guessVmNameFromVmxPath(vm.vmxPath) });
       await refresh();
     } catch (err) {
@@ -243,7 +327,10 @@ export default function App() {
     setIsDiagRunning(true);
     setDiagError("");
     try {
-      const out = await tauri.sshExec(ssh, diagCommand);
+      const out = await withLog("run_diag", (requestId) => tauri.sshExec(ssh, diagCommand, requestId), {
+        summary: "Run diagnostic command",
+        meta: { ssh: summarizeSsh(ssh) },
+      });
       setDiagOutput(out);
       pushToast({ kind: "success", title: "诊断命令已执行" });
     } catch (err) {
@@ -260,7 +347,15 @@ export default function App() {
     setScanResults([]);
     try {
       const results =
-        scanMode === "default" ? await tauri.vmwareScanDefaultVmx(ssh) : await tauri.vmwareScanVmx(ssh, scanRoots);
+        scanMode === "default"
+          ? await withLog("scan_vmx_default", (requestId) => tauri.vmwareScanDefaultVmx(ssh, requestId), {
+              summary: "Scan default roots",
+              meta: { ssh: summarizeSsh(ssh) },
+            })
+          : await withLog("scan_vmx_custom", (requestId) => tauri.vmwareScanVmx(ssh, scanRoots, requestId), {
+              summary: "Scan custom roots",
+              meta: { ssh: summarizeSsh(ssh), rootsCount: scanRoots.length },
+            });
       setScanResults(results);
       setScanSelection(Object.fromEntries(results.map((p) => [p, true])));
       pushToast({ kind: "success", title: "扫描完成", message: `找到 ${results.length} 个 VMX` });
@@ -275,6 +370,12 @@ export default function App() {
   function importSelected() {
     const selected = scanResults.filter((p) => scanSelection[p]);
     if (!selected.length) return;
+    pushLog({
+      action: "import_scan_results",
+      status: "success",
+      summary: "Import scan results",
+      meta: { selectedCount: selected.length, totalCount: scanResults.length },
+    });
     setKnownVms((prev) =>
       normalizeKnownVms([
         ...prev,
@@ -296,10 +397,17 @@ export default function App() {
   }, [knownVms, runningVmxPaths]);
 
   useEffect(() => {
+    pushLog({ action: "app_init", status: "success", summary: "App init" });
     void refreshKeyStatus();
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (route !== "settings") return;
+    void refreshTraces();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route]);
 
   return (
     <div className={ui.page}>
@@ -344,6 +452,12 @@ export default function App() {
             onRunDiag={() => void runDiagCommand()}
             onTestConnection={() => void testConnection()}
             onBack={() => navigate("console")}
+            opLog={opLog}
+            onClearOpLog={() => setOpLog([])}
+            traces={traces}
+            isTracesLoading={isTracesLoading}
+            onRefreshTraces={() => void refreshTraces()}
+            onClearTraces={() => void clearTraces()}
           />
         )}
       </main>

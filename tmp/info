@@ -1,0 +1,104 @@
+操作日志
+记录按钮触发的操作，可展开查看原始命令与执行结果（不记录私钥内容）。
+
+全部
+成功
+失败
+刷新
+清空
+scan_vmx_custom2025/12/31 18:30:28 · 2759ms
+
+Scan custom roots
+
+复制
+Meta
+
+{
+  "ssh": {
+    "host": "192.168.5.100",
+    "port": 22,
+    "user": "rin"
+  },
+  "rootsCount": 2
+}
+暂无命令追踪数据。
+
+refresh_running2025/12/31 18:30:21 · 5687ms
+
+List running VMs
+
+复制
+refresh_running2025/12/31 18:30:21 · 5648ms
+
+List running VMs
+
+复制
+Meta
+
+{
+  "ssh": {
+    "host": "192.168.5.100",
+    "port": 22,
+    "user": "rin"
+  }
+}
+暂无命令追踪数据。
+
+refresh_key_status2025/12/31 18:30:16 · 25ms
+
+复制
+Meta
+
+{
+  "ssh": {
+    "host": "192.168.5.100",
+    "port": 22,
+    "user": "rin"
+  }
+}
+暂无命令追踪数据。
+
+refresh_key_status2025/12/31 18:30:16 · 29ms
+
+复制
+Meta
+
+{
+  "ssh": {
+    "host": "192.168.5.100",
+    "port": 22,
+    "user": "rin"
+  }
+}
+暂无命令追踪数据。
+
+app_init2025/12/31 18:30:15
+
+App init
+
+复制
+暂无命令追踪数据。
+
+app_init2025/12/31 18:30:15
+
+App init
+
+复制
+暂无命令追踪数据。
+
+scan_vmx_custom2025/12/31 18:26:02 · 342ms
+
+Scan custom roots
+
+复制
+Meta
+
+{
+  "ssh": {
+    "host": "192.168.5.100",
+    "port": 22,
+    "user": "rin"
+  },
+  "rootsCount": 2
+}
+暂无命令追踪数据。

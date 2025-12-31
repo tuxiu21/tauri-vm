@@ -1,6 +1,8 @@
 import { useMemo, useRef, useState } from "react";
 import type { SshConfig } from "../app/types";
 import { ui } from "../components/ui";
+import type { LogEvent } from "../app/log";
+import type { TraceEntry } from "../app/tauri";
 
 export function SettingsPage(props: {
   ssh: SshConfig;
@@ -20,9 +22,16 @@ export function SettingsPage(props: {
   onRunDiag: () => void;
   onTestConnection: () => void;
   onBack: () => void;
+  opLog: LogEvent[];
+  onClearOpLog: () => void;
+  traces: TraceEntry[];
+  isTracesLoading: boolean;
+  onRefreshTraces: () => void;
+  onClearTraces: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [newRoot, setNewRoot] = useState("");
+  const [logFilter, setLogFilter] = useState<"all" | "success" | "error">("all");
   const defaultRoots = useMemo(
     () => ["$env:USERPROFILE\\Documents\\Virtual Machines", "$env:PUBLIC\\Documents\\Shared Virtual Machines"],
     [],
@@ -40,6 +49,23 @@ export function SettingsPage(props: {
     const text = await file.text();
     props.onUploadKeyText(text);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  const filteredLog = useMemo(() => {
+    if (logFilter === "all") return props.opLog;
+    return props.opLog.filter((e) => e.status === logFilter);
+  }, [logFilter, props.opLog]);
+
+  const traceMap = useMemo(() => {
+    const map = new Map<string, TraceEntry>();
+    for (const trace of props.traces) {
+      if (trace.requestId) map.set(trace.requestId, trace);
+    }
+    return map;
+  }, [props.traces]);
+
+  function copyEvent(event: LogEvent) {
+    return navigator.clipboard.writeText(JSON.stringify(event, null, 2));
   }
 
   return (
@@ -222,6 +248,126 @@ export function SettingsPage(props: {
           {props.diagOutput || "等待输出…"}
         </pre>
       </details>
+
+      <section className={`p-4 ${ui.card}`}>
+        <div className={ui.cardHeader}>
+          <div>
+            <h2 className={ui.h2}>操作日志</h2>
+            <p className={`mt-1.5 ${ui.muted}`}>
+              记录按钮触发的操作，可展开查看原始命令与执行结果（不记录私钥内容）。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className={`${ui.button} ${logFilter === "all" ? ui.buttonPrimary : ""}`}
+              onClick={() => setLogFilter("all")}
+            >
+              全部
+            </button>
+            <button
+              type="button"
+              className={`${ui.button} ${logFilter === "success" ? ui.buttonPrimary : ""}`}
+              onClick={() => setLogFilter("success")}
+            >
+              成功
+            </button>
+            <button
+              type="button"
+              className={`${ui.button} ${logFilter === "error" ? ui.buttonPrimary : ""}`}
+              onClick={() => setLogFilter("error")}
+            >
+              失败
+            </button>
+            <button
+              type="button"
+              className={`${ui.button} ${ui.buttonPrimary}`}
+              onClick={props.onRefreshTraces}
+              disabled={props.isTracesLoading}
+            >
+              {props.isTracesLoading ? "刷新中…" : "刷新"}
+            </button>
+            <button
+              type="button"
+              className={ui.button}
+              onClick={() => {
+                props.onClearOpLog();
+                props.onClearTraces();
+              }}
+              disabled={!props.opLog.length && !props.traces.length}
+            >
+              清空
+            </button>
+          </div>
+        </div>
+
+        {filteredLog.length ? (
+          <ul className="mt-3 flex max-h-[420px] list-none flex-col gap-2 overflow-auto p-0">
+            {filteredLog.map((e) => (
+              <li
+                key={e.id}
+                className={`rounded-2xl border px-3 py-2 ${
+                  e.status === "error"
+                    ? "border-rose-500/35 bg-rose-500/10 text-rose-950 dark:text-rose-100"
+                    : "border-slate-900/10 bg-white/60 text-slate-950 dark:border-slate-700/60 dark:bg-slate-900/60 dark:text-white"
+                }`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="m-0 font-semibold">
+                      {e.action}
+                      <span className={`ml-2 text-sm ${ui.muted}`}>
+                        {new Date(e.at).toLocaleString()}
+                        {typeof e.durationMs === "number" ? ` · ${e.durationMs}ms` : ""}
+                      </span>
+                    </p>
+                    {e.summary ? <p className={`m-0 mt-1 text-sm ${ui.muted}`}>{e.summary}</p> : null}
+                    {e.error ? <p className="m-0 mt-1 break-words text-sm opacity-90">{e.error}</p> : null}
+                  </div>
+                  <button type="button" className={ui.button} onClick={() => void copyEvent(e)}>
+                    复制
+                  </button>
+                </div>
+
+                <details className="mt-2">
+                  <summary className={`cursor-pointer select-none text-sm ${ui.muted}`}>查看详情</summary>
+                  <div className="mt-2 grid gap-2">
+                    {e.meta ? (
+                      <div className="rounded-2xl border border-slate-900/10 bg-white/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
+                        <p className="m-0 text-sm font-semibold">Meta</p>
+                        <pre className={`m-0 mt-1 whitespace-pre-wrap break-words font-mono text-sm ${ui.muted}`}>
+                          {JSON.stringify(e.meta, null, 2)}
+                        </pre>
+                      </div>
+                    ) : null}
+
+                    {e.requestId && traceMap.has(e.requestId) ? (
+                      <>
+                        <div className="rounded-2xl border border-slate-900/10 bg-white/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
+                          <p className="m-0 text-sm font-semibold">Command</p>
+                          <pre className={`m-0 mt-1 whitespace-pre-wrap break-words font-mono text-sm ${ui.muted}`}>
+                            {traceMap.get(e.requestId)?.command}
+                          </pre>
+                        </div>
+                        <div className="rounded-2xl border border-slate-900/10 bg-white/70 p-3 dark:border-slate-700/60 dark:bg-slate-900/60">
+                          <p className="m-0 text-sm font-semibold">Output</p>
+                          <pre className={`m-0 mt-1 whitespace-pre-wrap break-words font-mono text-sm ${ui.muted}`}>
+                            {traceMap.get(e.requestId)?.output || "(empty)"}
+                          </pre>
+                        </div>
+                      </>
+                    ) : (
+                      <p className={`m-0 text-sm ${ui.muted}`}>暂无命令追踪数据。</p>
+                    )}
+                  </div>
+                </details>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className={`m-0 mt-3 ${ui.muted}`}>暂无记录。</p>
+        )}
+      </section>
     </div>
   );
 }
