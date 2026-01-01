@@ -384,7 +384,13 @@ fn vm_passwords_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 fn normalize_vmx_key(vmx_path: &str) -> String {
-    vmx_path.trim().to_lowercase()
+    // Best-effort normalization so a password saved from one UI path string
+    // can be retrieved even if the path formatting differs (quotes/slashes/case).
+    vmx_path
+        .trim()
+        .trim_matches('"')
+        .replace('/', "\\")
+        .to_lowercase()
 }
 
 fn load_vm_passwords(app: &AppHandle) -> Result<HashMap<String, String>, String> {
@@ -410,9 +416,26 @@ fn save_vm_passwords(app: &AppHandle, map: &HashMap<String, String>) -> Result<(
 }
 
 fn get_vm_password(app: &AppHandle, vmx_path: &str) -> Result<Option<String>, String> {
-    let key = normalize_vmx_key(vmx_path);
     let map = load_vm_passwords(app)?;
-    Ok(map.get(&key).cloned())
+    let key = normalize_vmx_key(vmx_path);
+    if let Some(v) = map.get(&key) {
+        return Ok(Some(v.clone()));
+    }
+
+    // Backward compatibility: older versions only used trim+lowercase.
+    let legacy_key = vmx_path.trim().to_lowercase();
+    if let Some(v) = map.get(&legacy_key) {
+        return Ok(Some(v.clone()));
+    }
+
+    // Last resort: normalize stored keys and compare.
+    for (k, v) in map.iter() {
+        if normalize_vmx_key(k) == key {
+            return Ok(Some(v.clone()));
+        }
+    }
+
+    Ok(None)
 }
 
 #[tauri::command]
@@ -809,21 +832,30 @@ $out
 
 fn vmrun_requires_password(output: &str) -> bool {
     let t = output.to_lowercase();
-    if !t.contains("password") {
-        return false;
+
+    // English
+    if t.contains("password") {
+        return t.contains("encrypted")
+            || t.contains("protection")
+            || t.contains("requires")
+            || t.contains("need")
+            || t.contains("not correct")
+            || t.contains("incorrect");
     }
-    t.contains("encrypted")
-        || t.contains("protection")
-        || t.contains("requires")
-        || t.contains("need")
-        || t.contains("not correct")
-        || t.contains("incorrect")
+
+    // Chinese (common VMware Workstation messages on Windows)
+    // e.g. "此操作需要输入密码"
+    output.contains("密码") || output.contains("需要输入密码") || output.contains("需要輸入密碼")
 }
 
 fn vmrun_bad_password(output: &str) -> bool {
     let t = output.to_lowercase();
-    t.contains("password")
-        && (t.contains("password is incorrect") || t.contains("incorrect password") || t.contains("not correct"))
+    if t.contains("password") {
+        return t.contains("password is incorrect") || t.contains("incorrect password") || t.contains("not correct");
+    }
+
+    // Chinese variants
+    output.contains("密码不正确") || output.contains("密碼不正確") || output.contains("密码错误") || output.contains("密碼錯誤")
 }
 
 #[tauri::command]
@@ -846,20 +878,21 @@ async fn vmware_start_vm_auto(
     vmx_path: String,
     request_id: Option<String>,
 ) -> Result<String, String> {
+    if let Some(password) = get_vm_password(&app, &vmx_path)? {
+        return match vmware_start_vm_inner(&app, &store, ssh, vmx_path, Some(password), request_id).await {
+            Ok(out) => Ok(out),
+            Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
+            Err(err2) => Err(err2),
+        };
+    }
+
     match vmware_start_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), None, request_id.clone()).await {
         Ok(out) => Ok(out),
         Err(err) => {
-            if !vmrun_requires_password(&err) {
-                return Err(err);
-            }
-            let password = get_vm_password(&app, &vmx_path)?;
-            let Some(password) = password else {
-                return Err(VM_PASSWORD_REQUIRED.to_string());
-            };
-            match vmware_start_vm_inner(&app, &store, ssh, vmx_path, Some(password), request_id).await {
-                Ok(out) => Ok(out),
-                Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
-                Err(err2) => Err(err2),
+            if vmrun_requires_password(&err) {
+                Err(VM_PASSWORD_REQUIRED.to_string())
+            } else {
+                Err(err)
             }
         }
     }
@@ -991,21 +1024,22 @@ async fn vmware_stop_vm_auto(
     mode: Option<VmStopMode>,
     request_id: Option<String>,
 ) -> Result<String, String> {
+    if let Some(password) = get_vm_password(&app, &vmx_path)? {
+        return match vmware_stop_vm_inner(&app, &store, ssh, vmx_path, mode, Some(password), request_id).await {
+            Ok(out) => Ok(out),
+            Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
+            Err(err2) => Err(err2),
+        };
+    }
+
     match vmware_stop_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), mode.clone(), None, request_id.clone()).await
     {
         Ok(out) => Ok(out),
         Err(err) => {
-            if !vmrun_requires_password(&err) {
-                return Err(err);
-            }
-            let password = get_vm_password(&app, &vmx_path)?;
-            let Some(password) = password else {
-                return Err(VM_PASSWORD_REQUIRED.to_string());
-            };
-            match vmware_stop_vm_inner(&app, &store, ssh, vmx_path, mode, Some(password), request_id).await {
-                Ok(out) => Ok(out),
-                Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
-                Err(err2) => Err(err2),
+            if vmrun_requires_password(&err) {
+                Err(VM_PASSWORD_REQUIRED.to_string())
+            } else {
+                Err(err)
             }
         }
     }
