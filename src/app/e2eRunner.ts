@@ -10,6 +10,21 @@ type E2EEvent = {
   meta?: Record<string, unknown>;
 };
 
+function e2eLog(...args: unknown[]) {
+  const message = args
+    .map((a) => {
+      if (typeof a === "string") return a;
+      try {
+        return JSON.stringify(a);
+      } catch {
+        return String(a);
+      }
+    })
+    .join(" ");
+
+  void invoke("e2e_log", { message });
+}
+
 function envFlag(value: unknown): boolean {
   if (value == null) return false;
   const text = String(value).trim().toLowerCase();
@@ -89,19 +104,25 @@ async function runStep<T>(
   fn: () => Promise<T>,
   meta?: Record<string, unknown>,
 ): Promise<T> {
+  e2eLog("STEP start", name, meta ? JSON.stringify(meta) : "");
   const started = performance.now();
   try {
     const res = await fn();
-    events.push({ name, ok: true, durationMs: Math.round(performance.now() - started), meta });
+    const durationMs = Math.round(performance.now() - started);
+    events.push({ name, ok: true, durationMs, meta });
+    e2eLog("STEP pass", name, `${durationMs}ms`);
     return res;
   } catch (err) {
+    const durationMs = Math.round(performance.now() - started);
+    const errorText = err instanceof Error ? err.message : String(err);
     events.push({
       name,
       ok: false,
-      durationMs: Math.round(performance.now() - started),
-      error: err instanceof Error ? err.message : String(err),
+      durationMs,
+      error: errorText,
       meta,
     });
+    e2eLog("STEP fail", name, `${durationMs}ms`, errorText);
     throw err;
   }
 }
@@ -149,6 +170,8 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
   const events: E2EEvent[] = [];
   const ssh = buildSshFromEnv();
 
+  e2eLog("SUITE start");
+
   if (!ssh) {
     events.push({
       name: "env_check",
@@ -156,6 +179,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
       durationMs: 0,
       error: "Missing VITE_E2E_SSH_HOST or VITE_E2E_SSH_USER (and optionally VITE_E2E_SSH_PORT).",
     });
+    e2eLog("SUITE fail", "Missing required SSH env vars.");
     return { ok: false, events };
   }
 
@@ -169,6 +193,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
   const timeoutMs = Number(envText(import.meta.env.VITE_E2E_TIMEOUT_MS) || "120000");
 
   try {
+    e2eLog("CONFIG", JSON.stringify({ hasVmxPath: Boolean(vmxPath), runHardStop, waitAfterStartMs, timeoutMs }));
     await runStep(events, "trace_clear", () => tauri.traceClear());
 
     const keyPresent = await runStep(events, "ssh_key_status", () => tauri.sshKeyStatus());
@@ -273,6 +298,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
     }
 
     await runStep(events, "trace_list", () => tauri.traceList());
+    e2eLog("SUITE pass");
     return { ok: true, events };
   } catch {
     try {
@@ -280,6 +306,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
     } catch {
       // ignore: suite is failing already
     }
+    e2eLog("SUITE fail");
     return { ok: false, events };
   } finally {
     if (keyText) {

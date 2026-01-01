@@ -318,6 +318,22 @@ fn e2e_write_report(report_json: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn e2e_log(message: String) {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let max_len = 8 * 1024;
+    let safe = if trimmed.len() > max_len {
+        let head = &trimmed[..max_len.saturating_sub(1)];
+        format!("{head}…")
+    } else {
+        trimmed.to_string()
+    };
+    println!("[e2e] {safe}");
+}
+
 fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
     let key_path = ssh_private_key_path(app)?;
     let key_text = std::fs::read_to_string(&key_path).map_err(|err| {
@@ -1186,6 +1202,7 @@ pub fn run() {
             greet,
             e2e_exit,
             e2e_write_report,
+            e2e_log,
             trace_list,
             trace_clear,
             ssh_key_status,
