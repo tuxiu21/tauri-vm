@@ -139,12 +139,25 @@ async function waitForVmRunningState(
   timeoutMs: number,
   label: string,
 ): Promise<void> {
+  e2eLog(label, "wait_start", { wantRunning, timeoutMs });
   const started = Date.now();
+  let lastLogAt = started;
+  let polls = 0;
   while (Date.now() - started < timeoutMs) {
     const running = await vmIsRunning(ssh, vmxPath, newRequestId(label));
-    if (running === wantRunning) return;
+    polls += 1;
+    const now = Date.now();
+    if (running === wantRunning) {
+      e2eLog(label, "wait_ok", { running, polls, elapsedMs: now - started });
+      return;
+    }
+    if (now - lastLogAt >= 5_000) {
+      lastLogAt = now;
+      e2eLog(label, "wait_poll", { running, polls, elapsedMs: now - started });
+    }
     await sleep(750);
   }
+  e2eLog(label, "wait_timeout", { wantRunning, polls, elapsedMs: Date.now() - started });
   throw new Error(`${label} timed out after ${timeoutMs}ms`);
 }
 

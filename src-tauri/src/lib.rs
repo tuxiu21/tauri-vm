@@ -287,10 +287,11 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn e2e_exit(code: i32) {
+    let ts = now_ms();
     if code == 0 {
-        println!("[e2e] PASS");
+        println!("[e2e][{ts}] PASS");
     } else {
-        println!("[e2e] FAIL");
+        println!("[e2e][{ts}] FAIL");
     }
     std::process::exit(code);
 }
@@ -331,7 +332,8 @@ fn e2e_log(message: String) {
     } else {
         trimmed.to_string()
     };
-    println!("[e2e] {safe}");
+    let ts = now_ms();
+    println!("[e2e][{ts}] {safe}");
 }
 
 fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
