@@ -55,6 +55,12 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function truncateForLog(text: string, maxLen = 800): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLen) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
 async function withTimeout<T>(label: string, ms: number, fn: () => Promise<T>): Promise<T> {
   let timeoutHandle: number | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -175,7 +181,12 @@ async function tryStopVm(
 
 async function tryStartVm(ssh: SshConfig, vmxPath: string, requestId: string, vmPassword?: string): Promise<void> {
   await withRetry("vmware_start_vm", 2, 800, async () => {
-    await tauri.vmwareStartVmWithPassword(ssh, vmxPath, vmPassword || undefined, requestId);
+    const out = await tauri.vmwareStartVmWithPassword(ssh, vmxPath, vmPassword || undefined, requestId);
+    e2eLog("DEBUG", "vmware_start_vm", {
+      requestId,
+      outputChars: out.length,
+      outputPreview: truncateForLog(out, 1200),
+    });
   });
 }
 

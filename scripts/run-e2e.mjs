@@ -79,7 +79,10 @@ function settle(exitCode, reason) {
 }
 
 function onLine(line) {
-  const m = /^\[e2e\]\s+(PASS|FAIL)\b/.exec(line);
+  // Supports both:
+  // - `[e2e] PASS ...` (legacy console.log format)
+  // - `[e2e][<ms>] PASS` (Rust e2e_exit/e2e_log format)
+  const m = /^\[e2e\](?:\[\d+\])?\s+(PASS|FAIL)\b/.exec(line);
   if (!m) return;
   settle(m[1] === "PASS" ? 0 : 1);
 }

@@ -699,124 +699,100 @@ async fn vmware_start_vm_inner(
 ) -> Result<String, String> {
     let mut session = ssh_connect(app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
-    let (ps_exec, ps_log) = if let Some(vm_password) = vm_password {
-        let pw_quoted = ps_single_quote_escape(&vm_password);
-        (
-            format!(
-                r#"
-{prelude}
-{locator}
-$vmx = '{vmx}'
-$vmPassword = '{pw}'
-$args = @('-T', 'ws', '-vp', $vmPassword, 'start', $vmx, 'nogui')
-$out = & $vmrun @args 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{
-  if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
-  exit $code
-}}
-function Parse-RunningList([string]$listOut) {{
-  $running=@()
-  foreach($line in ($listOut -split "`n")) {{
-    if ($null -eq $line) {{ continue }}
-    $t = $line.Trim().TrimEnd("`r").Trim('"')
-    if (-not $t) {{ continue }}
-    if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
-    $running += $t
-  }}
-  return $running
-}}
+    if vmx_path.contains('"') || vmx_path.contains('\n') || vmx_path.contains('\r') {
+        return Err("VMX path contains unsupported characters".to_string());
+    }
 
-$isRunning = $false
-for ($i = 0; $i -lt 15; $i += 1) {{
-  Start-Sleep -Seconds 1
-  $listOut = & $vmrun -T ws list 2>&1
-  $running = Parse-RunningList $listOut
-  foreach($p in $running) {{
-    if ($p -ieq $vmx) {{ $isRunning = $true; break }}
-  }}
-  if ($isRunning) {{ break }}
-}}
-
-if (-not $isRunning) {{
-  if ($out) {{ $out }} else {{ 'vmrun start returned success but VM is not running' }}
-  $listOut
-  exit 2
-}}
-$out
-"#,
-                prelude = powershell_prelude(),
-                locator = vmrun_locator_ps(),
-                vmx = vmx_quoted,
-                pw = pw_quoted
-            ),
-            format!(
-                r#"
-{prelude}
-{locator}
-$vmx = '{vmx}'
-$vmPassword = '[REDACTED]'
-$args = @('-T', 'ws', '-vp', $vmPassword, 'start', $vmx, 'nogui')
-$out = & $vmrun @args 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{
-  if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
-  exit $code
-}}
-function Parse-RunningList([string]$listOut) {{
-  $running=@()
-  foreach($line in ($listOut -split "`n")) {{
-    if ($null -eq $line) {{ continue }}
-    $t = $line.Trim().TrimEnd("`r").Trim('"')
-    if (-not $t) {{ continue }}
-    if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
-    $running += $t
-  }}
-  return $running
-}}
-
-$isRunning = $false
-for ($i = 0; $i -lt 15; $i += 1) {{
-  Start-Sleep -Seconds 1
-  $listOut = & $vmrun -T ws list 2>&1
-  $running = Parse-RunningList $listOut
-  foreach($p in $running) {{
-    if ($p -ieq $vmx) {{ $isRunning = $true; break }}
-  }}
-  if ($isRunning) {{ break }}
-}}
-
-if (-not $isRunning) {{
-  if ($out) {{ $out }} else {{ 'vmrun start returned success but VM is not running' }}
-  $listOut
-  exit 2
-}}
-$out
-"#,
-                prelude = powershell_prelude(),
-                locator = vmrun_locator_ps(),
-                vmx = vmx_quoted
-            ),
-        )
+    let (vm_password_exec, vm_password_log, cleanup_task_after_run) = if let Some(vm_password) = vm_password {
+        if vm_password.contains('"') || vm_password.contains('\n') || vm_password.contains('\r') {
+            return Err("VM password contains unsupported characters".to_string());
+        }
+        (Some(ps_single_quote_escape(&vm_password)), "[REDACTED]".to_string(), true)
     } else {
-        let ps = format!(
-            r#"
-{}
-{}
-$out = & $vmrun -T ws start '{}' nogui 2>&1
+        (None, "".to_string(), false)
+    };
+
+    let (pw_exec_line, has_pw) = if let Some(pw) = &vm_password_exec {
+        (format!("$vmPassword = '{pw}'"), "$true")
+    } else {
+        ("".to_string(), "$false")
+    };
+
+    let ps_exec = format!(
+        r#"
+{prelude}
+{locator}
+
+$vmx = '{vmx}'
+{pw_line}
+$hasPassword = {has_pw}
+$taskName = 'tauri-app-vmstart-temp'
+
+$arg = '-T ws '
+if ($hasPassword) {{ $arg += ('-vp "' + $vmPassword + '" ') }}
+$arg += ('start "' + $vmx + '" nogui')
+
+Write-Output ("TASK name=" + $taskName)
+Write-Output ("TASK arg=" + $arg)
+
+$hasScheduledTasks = $null -ne (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)
+if ($hasScheduledTasks) {{
+  try {{
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+  }} catch {{ }}
+
+  try {{
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
+    $action = New-ScheduledTaskAction -Execute $vmrun -Argument $arg
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+    Start-Sleep -Milliseconds 250
+    $info = Get-ScheduledTaskInfo -TaskName $taskName | Select-Object LastRunTime, LastTaskResult | ConvertTo-Json -Compress
+    Write-Output ("TASK info=" + $info)
+    if ({cleanup}) {{
+      try {{ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null }} catch {{ }}
+    }}
+    exit 0
+  }} catch {{
+    Write-Output "TASK register_or_run_failed"
+    Write-Output ($_ | Out-String)
+  }}
+}} else {{
+  Write-Output "TASK scheduledtasks_module_missing"
+}}
+
+# Fallback to direct vmrun invocation (legacy behavior).
+$args = @('-T','ws')
+if ($hasPassword) {{ $args += @('-vp', $vmPassword) }}
+$args += @('start',$vmx,'nogui')
+$out = & $vmrun @args 2>&1
 $code = $LASTEXITCODE
 if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
+if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}; exit $code }}
 $out
 "#,
-            powershell_prelude(),
-            vmrun_locator_ps(),
-            vmx_quoted
-        );
-        (ps.clone(), ps)
-    };
+        prelude = powershell_prelude(),
+        locator = vmrun_locator_ps(),
+        vmx = vmx_quoted,
+        pw_line = pw_exec_line,
+        has_pw = has_pw,
+        cleanup = if cleanup_task_after_run { "$true" } else { "$false" },
+    );
+
+    let ps_log = format!(
+        r#"
+{prelude}
+{locator}
+$vmx = '{vmx}'
+$vmPassword = '{pw_log}'
+# Creates/updates and runs a scheduled task to start the VM, then polls vmrun list.
+"#,
+        prelude = powershell_prelude(),
+        locator = vmrun_locator_ps(),
+        vmx = vmx_quoted,
+        pw_log = vm_password_log
+    );
+
     let exec_command = powershell_encoded(&ps_exec);
     let started = Instant::now();
     let res = session.exec_collect_full(&exec_command).await?;
