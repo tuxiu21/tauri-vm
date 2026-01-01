@@ -287,7 +287,35 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn e2e_exit(code: i32) {
+    if code == 0 {
+        println!("[e2e] PASS");
+    } else {
+        println!("[e2e] FAIL");
+    }
     std::process::exit(code);
+}
+
+#[tauri::command]
+fn e2e_write_report(report_json: String) -> Result<String, String> {
+    fn find_repo_root(mut dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+        loop {
+            if dir.join("package.json").is_file() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
+    let cwd = std::env::current_dir().map_err(|err| format!("{err:?}"))?;
+    let root = find_repo_root(cwd)
+        .ok_or_else(|| "Could not locate repo root (package.json) from current_dir".to_string())?;
+    let tmp_dir = root.join("tmp");
+    std::fs::create_dir_all(&tmp_dir).map_err(|err| format!("{err:?}"))?;
+    let path = tmp_dir.join("e2e-report.json");
+    std::fs::write(&path, report_json).map_err(|err| format!("{err:?}"))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn load_ssh_private_key(app: &AppHandle) -> Result<PrivateKey, String> {
@@ -1111,6 +1139,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             e2e_exit,
+            e2e_write_report,
             trace_list,
             trace_clear,
             ssh_key_status,

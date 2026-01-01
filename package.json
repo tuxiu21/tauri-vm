@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "e2e": "node ./scripts/run-e2e.mjs",
     "android": "set CMAKE_GENERATOR=Ninja&& set \"CMAKE_MAKE_PROGRAM=C:\\ProgramData\\chocolatey\\bin\\ninja.exe\"&& tauri android dev --host 192.168.5.100"
   },
   "dependencies": {

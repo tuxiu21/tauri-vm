@@ -281,7 +281,13 @@ export async function maybeRunE2EInvokeSuite() {
   // eslint-disable-next-line no-console
   console.log(`[e2e] ${payload.ok ? "PASS" : "FAIL"} ${JSON.stringify(payload)}`);
 
+  try {
+    await invoke<string>("e2e_write_report", { reportJson: JSON.stringify(payload, null, 2) });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[e2e] report_write_failed ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   // Exit the app so callers can rely on the process exit code.
   await invoke("e2e_exit", { code: report.ok ? 0 : 1 });
 }
-

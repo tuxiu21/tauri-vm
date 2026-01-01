@@ -37,8 +37,16 @@ $env:VITE_E2E_SCAN_ROOTS='["$env:USERPROFILE\\\\Documents\\\\Virtual Machines"]'
 pnpm tauri dev
 ```
 
+## Quick Start (pnpm script)
+
+```powershell
+$env:VITE_E2E_SSH_HOST="192.168.5.100"
+$env:VITE_E2E_SSH_USER="rin"
+
+pnpm e2e
+```
+
 ## Notes
 
 - `vmrun.exe` must exist on the remote host at one of the paths hard-coded in `src-tauri/src/lib.rs`.
 - Use a dedicated test VM for start/stop tests to avoid disrupting your real environments.
-
