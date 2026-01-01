@@ -165,6 +165,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
   const expectVmxSubstr = envText(import.meta.env.VITE_E2E_EXPECT_VMX_SUBSTR);
   const keyText = envText(import.meta.env.VITE_E2E_SSH_KEY_TEXT);
   const runHardStop = envFlag(import.meta.env.VITE_E2E_RUN_HARD_STOP);
+  const waitAfterStartMs = Number(envText(import.meta.env.VITE_E2E_WAIT_AFTER_START_MS) || "0");
   const timeoutMs = Number(envText(import.meta.env.VITE_E2E_TIMEOUT_MS) || "120000");
 
   try {
@@ -206,6 +207,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
       await runStep(events, "vmware_start_vm", () =>
         withTimeout("vmware_start_vm", timeoutMs, async () => {
           await tryStartVm(ssh, vmxPath, newRequestId("vmware_start_vm"), vmPassword);
+          if (Number.isFinite(waitAfterStartMs) && waitAfterStartMs > 0) await sleep(waitAfterStartMs);
           await waitForVmRunningState(ssh, vmxPath, true, Math.min(timeoutMs, 25_000), "vmware_wait_running");
         }),
       );
@@ -221,6 +223,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
         await runStep(events, "vmware_start_vm_for_hard_stop", () =>
           withTimeout("vmware_start_vm (hard stop pre)", timeoutMs, async () => {
             await tryStartVm(ssh, vmxPath, newRequestId("vmware_start_vm_for_hard_stop"), vmPassword);
+            if (Number.isFinite(waitAfterStartMs) && waitAfterStartMs > 0) await sleep(waitAfterStartMs);
           }),
         );
 

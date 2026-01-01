@@ -21,6 +21,7 @@ All variables are read from `import.meta.env`, so they must be prefixed with `VI
 - `VITE_E2E_VM_VMX_PATH` (optional): enables real start/stop tests against this `.vmx` path.
 - `VITE_E2E_VM_PASSWORD` (optional): VMware VM password (if required).
 - `VITE_E2E_RUN_HARD_STOP=1` (optional): also test `vmware_stop_vm` with `hard`.
+- `VITE_E2E_WAIT_AFTER_START_MS` (optional, default `0`): extra delay after `vmware_start_vm` returns (before polling `vmware_list_running`).
 - `VITE_E2E_SCAN_ROOTS` (optional): JSON array of roots for `vmware_scan_vmx`, e.g. `["$env:USERPROFILE\\\\Documents\\\\Virtual Machines"]`.
 - `VITE_E2E_EXPECT_VMX_SUBSTR` (optional): if set, `vmware_scan_default_vmx` must return a path containing this substring (case-insensitive) or the suite fails.
 - `VITE_E2E_TIMEOUT_MS` (optional, default `120000`): per-step timeout.
