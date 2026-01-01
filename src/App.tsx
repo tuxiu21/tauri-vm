@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 import type { KnownVm, SshConfig, Toast, VmStopMode } from "./app/types";
@@ -103,6 +103,8 @@ export default function App() {
   const [vmPasswordDraft, setVmPasswordDraft] = useState("");
   const [vmPasswordError, setVmPasswordError] = useState("");
   const [isVmPasswordWorking, setIsVmPasswordWorking] = useState(false);
+  const [vmPasswordStatusByVmxPath, setVmPasswordStatusByVmxPath] = useState<Record<string, boolean | null>>({});
+  const vmPasswordStatusInFlight = useRef<Set<string>>(new Set());
 
   const [diagOutput, setDiagOutput] = useState("");
   const [diagError, setDiagError] = useState("");
@@ -119,6 +121,45 @@ export default function App() {
   useEffect(() => writeLocalStorageJson(LS.scanRoots, scanRoots), [scanRoots]);
   useEffect(() => writeLocalStorageJson(LS.diagCommand, diagCommand), [diagCommand]);
   useEffect(() => writeLocalStorageJson(LS.opLog, opLog), [opLog]);
+
+  useEffect(() => {
+    const keys = knownVms.map((vm) => vm.vmxPath.toLowerCase());
+    setVmPasswordStatusByVmxPath((prev) => {
+      const next: Record<string, boolean | null> = {};
+      for (const key of keys) next[key] = Object.prototype.hasOwnProperty.call(prev, key) ? prev[key] : null;
+      return next;
+    });
+  }, [knownVms]);
+
+  useEffect(() => {
+    const inFlight = vmPasswordStatusInFlight.current;
+    const vmsToCheck = knownVms.filter((vm) => {
+      const key = vm.vmxPath.toLowerCase();
+      return vmPasswordStatusByVmxPath[key] == null && !inFlight.has(key);
+    });
+    if (!vmsToCheck.length) return;
+
+    for (const vm of vmsToCheck) inFlight.add(vm.vmxPath.toLowerCase());
+
+    void (async () => {
+      const results = await Promise.allSettled(
+        vmsToCheck.map(async (vm) => {
+          const status = await tauri.vmPasswordStatus(vm.vmxPath);
+          return { key: vm.vmxPath.toLowerCase(), status };
+        }),
+      );
+
+      setVmPasswordStatusByVmxPath((prev) => {
+        const next = { ...prev };
+        for (const res of results) {
+          if (res.status === "fulfilled") next[res.value.key] = res.value.status;
+        }
+        return next;
+      });
+
+      for (const vm of vmsToCheck) inFlight.delete(vm.vmxPath.toLowerCase());
+    })();
+  }, [knownVms, vmPasswordStatusByVmxPath]);
 
   function pushToast(toast: Omit<Toast, "id">) {
     setToasts((prev) => [{ id: newId(), ...toast }, ...prev].slice(0, 3));
@@ -137,6 +178,7 @@ export default function App() {
     try {
       const status = await tauri.vmPasswordStatus(vm.vmxPath);
       setVmPasswordConfigured(status);
+      setVmPasswordStatusByVmxPath((prev) => ({ ...prev, [vm.vmxPath.toLowerCase()]: status }));
     } catch (err) {
       setVmPasswordError(String(err));
     }
@@ -157,6 +199,7 @@ export default function App() {
     try {
       await tauri.vmPasswordSet(vmPasswordVm.vmxPath, vmPasswordDraft);
       setVmPasswordConfigured(true);
+      setVmPasswordStatusByVmxPath((prev) => ({ ...prev, [vmPasswordVm.vmxPath.toLowerCase()]: true }));
       setVmPasswordDraft("");
       pushToast({ kind: "success", title: "VM password saved", message: guessVmNameFromVmxPath(vmPasswordVm.vmxPath) });
       closeVmPasswordModal();
@@ -174,6 +217,7 @@ export default function App() {
     try {
       await tauri.vmPasswordClear(vmPasswordVm.vmxPath);
       setVmPasswordConfigured(false);
+      setVmPasswordStatusByVmxPath((prev) => ({ ...prev, [vmPasswordVm.vmxPath.toLowerCase()]: false }));
       setVmPasswordDraft("");
       pushToast({ kind: "success", title: "VM password cleared", message: guessVmNameFromVmxPath(vmPasswordVm.vmxPath) });
     } catch (err) {
@@ -528,6 +572,7 @@ export default function App() {
             sshKeyPresent={sshKeyPresent}
             knownVms={knownVms}
             runningVmxPaths={runningVmxPaths}
+            vmPasswordStatusByVmxPath={vmPasswordStatusByVmxPath}
             lastRefreshAt={lastRefreshAt}
             globalError={globalError}
             isRefreshing={isRefreshing}

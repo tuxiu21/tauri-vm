@@ -20,6 +20,7 @@ export function ConsolePage(props: {
   sshKeyPresent: boolean | null;
   knownVms: KnownVm[];
   runningVmxPaths: string[];
+  vmPasswordStatusByVmxPath: Record<string, boolean | null>;
   lastRefreshAt: number | null;
   globalError: string;
   isRefreshing: boolean;
@@ -99,7 +100,7 @@ export function ConsolePage(props: {
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h1 className={ui.h1}>VM 控制台</h1>
-              <p className={`mt-1.5 max-w-[70ch] ${ui.muted}`}>扫描导入、启动、停止。复杂诊断放在设置里。</p>
+              <p className={`mt-1.5 max-w-[70ch] ${ui.muted}`}>导入虚拟机，一键启动/停止。</p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
@@ -262,6 +263,22 @@ export function ConsolePage(props: {
                     {vm.isBusy ? "执行中…" : vm.isRunning ? "运行中" : "已停止"}
                   </span>
 
+                  <span
+                    className={`${ui.pill} ${
+                      props.vmPasswordStatusByVmxPath[vm.vmxPath.toLowerCase()]
+                        ? "border-indigo-500/35 bg-indigo-500/10 text-indigo-900 dark:text-indigo-200"
+                        : ""
+                    }`}
+                    title="VM 密码按每台 VM 单独保存（以 VMX 路径区分），仅在 vmrun 提示需要密码时使用。"
+                  >
+                    VM 密码：
+                    {props.vmPasswordStatusByVmxPath[vm.vmxPath.toLowerCase()] == null
+                      ? "未知"
+                      : props.vmPasswordStatusByVmxPath[vm.vmxPath.toLowerCase()]
+                        ? "已保存"
+                        : "未设置"}
+                  </span>
+
                   <div className="flex flex-wrap items-center gap-2">
                     {vm.isBusy && vm.busyText ? <span className={`text-sm ${ui.muted}`}>{vm.busyText}</span> : null}
                     {vm.isRunning ? (
@@ -289,7 +306,7 @@ export function ConsolePage(props: {
                       onClick={() => props.onEditVmPassword(vm)}
                       disabled={vm.isBusy}
                     >
-                      Password
+                      VM 密码
                     </button>
                     <button
                       type="button"

@@ -74,7 +74,7 @@ export function SettingsPage(props: {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className={ui.h2}>设置</h2>
-            <p className={`mt-1.5 ${ui.muted}`}>把复杂项收在这里。日常操作回到控制台。</p>
+            <p className={`mt-1.5 ${ui.muted}`}>连接配置与诊断工具。</p>
           </div>
           <button type="button" className={ui.button} onClick={props.onBack}>
             返回控制台
@@ -130,28 +130,12 @@ export function SettingsPage(props: {
             />
           </label>
         </div>
-        <div className="mt-3 grid gap-3">
-          <label className="flex flex-col gap-1.5">
-            <span className={ui.label}>VM Password (optional)</span>
-            <input
-              className={`${ui.input} ${ui.inputPlaceholder}`}
-              type="password"
-              value=""
-              readOnly
-              disabled
-              placeholder="Per-VM password is configured from the VM list"
-              autoComplete="off"
-            />
-          </label>
-          <p className={`m-0 text-sm ${ui.muted}`}>仅用于受保护/需要密码的 VM，不会保存到本地。</p>
-        </div>
       </section>
 
       <section className={`p-4 ${ui.card}`}>
         <div className={ui.cardHeader}>
           <div>
             <h2 className={ui.h2}>SSH 私钥</h2>
-            <p className={`mt-1.5 ${ui.muted}`}>私钥仅保存在本机应用数据目录，不会打包进应用。</p>
           </div>
           <span className={ui.pill}>
             状态：{props.sshKeyPresent ? "已配置" : props.sshKeyPresent === false ? "缺失" : "检查中"}
@@ -269,7 +253,7 @@ export function SettingsPage(props: {
           <div>
             <h2 className={ui.h2}>操作日志</h2>
             <p className={`mt-1.5 ${ui.muted}`}>
-              记录按钮触发的操作，可展开查看原始命令与执行结果（不记录私钥内容）。
+              记录按钮触发的操作，可展开查看原始命令与执行结果。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
