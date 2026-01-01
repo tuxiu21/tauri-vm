@@ -675,21 +675,27 @@ if ($code -ne 0) {{
   if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
   exit $code
 }}
-Start-Sleep -Milliseconds 600
-$listOut = & $vmrun -T ws list 2>&1
-
-$running=@()
-foreach($line in ($listOut -split \"`n\")) {{
-  if ($null -eq $line) {{ continue }}
-  $t = $line.Trim().TrimEnd(\"`r\").Trim('\"')
-  if (-not $t) {{ continue }}
-  if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
-  $running += $t
+function Parse-RunningList([string]$listOut) {{
+  $running=@()
+  foreach($line in ($listOut -split "`n")) {{
+    if ($null -eq $line) {{ continue }}
+    $t = $line.Trim().TrimEnd("`r").Trim('"')
+    if (-not $t) {{ continue }}
+    if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
+    $running += $t
+  }}
+  return $running
 }}
 
 $isRunning = $false
-foreach($p in $running) {{
-  if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+for ($i = 0; $i -lt 15; $i += 1) {{
+  Start-Sleep -Seconds 1
+  $listOut = & $vmrun -T ws list 2>&1
+  $running = Parse-RunningList $listOut
+  foreach($p in $running) {{
+    if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+  }}
+  if ($isRunning) {{ break }}
 }}
 
 if (-not $isRunning) {{
@@ -718,21 +724,27 @@ if ($code -ne 0) {{
   if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}
   exit $code
 }}
-Start-Sleep -Milliseconds 600
-$listOut = & $vmrun -T ws list 2>&1
-
-$running=@()
-foreach($line in ($listOut -split \"`n\")) {{
-  if ($null -eq $line) {{ continue }}
-  $t = $line.Trim().TrimEnd(\"`r\").Trim('\"')
-  if (-not $t) {{ continue }}
-  if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
-  $running += $t
+function Parse-RunningList([string]$listOut) {{
+  $running=@()
+  foreach($line in ($listOut -split "`n")) {{
+    if ($null -eq $line) {{ continue }}
+    $t = $line.Trim().TrimEnd("`r").Trim('"')
+    if (-not $t) {{ continue }}
+    if ($t.ToLowerInvariant().StartsWith('total')) {{ continue }}
+    $running += $t
+  }}
+  return $running
 }}
 
 $isRunning = $false
-foreach($p in $running) {{
-  if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+for ($i = 0; $i -lt 15; $i += 1) {{
+  Start-Sleep -Seconds 1
+  $listOut = & $vmrun -T ws list 2>&1
+  $running = Parse-RunningList $listOut
+  foreach($p in $running) {{
+    if ($p -ieq $vmx) {{ $isRunning = $true; break }}
+  }}
+  if ($isRunning) {{ break }}
 }}
 
 if (-not $isRunning) {{

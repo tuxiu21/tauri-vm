@@ -111,6 +111,22 @@ async function vmIsRunning(ssh: SshConfig, vmxPath: string, requestId: string): 
   return list.some((p) => p.localeCompare(vmxPath, undefined, { sensitivity: "accent" }) === 0 || p.toLowerCase() === vmxPath.toLowerCase());
 }
 
+async function waitForVmRunningState(
+  ssh: SshConfig,
+  vmxPath: string,
+  wantRunning: boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const running = await vmIsRunning(ssh, vmxPath, newRequestId(label));
+    if (running === wantRunning) return;
+    await sleep(750);
+  }
+  throw new Error(`${label} timed out after ${timeoutMs}ms`);
+}
+
 async function tryStopVm(
   ssh: SshConfig,
   vmxPath: string,
@@ -190,17 +206,14 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
       await runStep(events, "vmware_start_vm", () =>
         withTimeout("vmware_start_vm", timeoutMs, async () => {
           await tryStartVm(ssh, vmxPath, newRequestId("vmware_start_vm"), vmPassword);
-          const isRunning = await vmIsRunning(ssh, vmxPath, newRequestId("vmware_list_running_after_start"));
-          if (!isRunning) throw new Error("vmware_start_vm returned success but VM is not running.");
+          await waitForVmRunningState(ssh, vmxPath, true, Math.min(timeoutMs, 25_000), "vmware_wait_running");
         }),
       );
 
       await runStep(events, "vmware_stop_soft", () =>
         withTimeout("vmware_stop_vm(soft)", timeoutMs, async () => {
           await tryStopVm(ssh, vmxPath, "soft", newRequestId("vmware_stop_soft"), vmPassword);
-          await sleep(400);
-          const stillRunning = await vmIsRunning(ssh, vmxPath, newRequestId("vmware_list_running_after_stop_soft"));
-          if (stillRunning) throw new Error("vmware_stop_vm(soft) returned success but VM is still running.");
+          await waitForVmRunningState(ssh, vmxPath, false, Math.min(timeoutMs, 40_000), "vmware_wait_stopped_soft");
         }),
       );
 
@@ -214,9 +227,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
         await runStep(events, "vmware_stop_hard", () =>
           withTimeout("vmware_stop_vm(hard)", timeoutMs, async () => {
             await tryStopVm(ssh, vmxPath, "hard", newRequestId("vmware_stop_hard"), vmPassword);
-            await sleep(400);
-            const stillRunning = await vmIsRunning(ssh, vmxPath, newRequestId("vmware_list_running_after_stop_hard"));
-            if (stillRunning) throw new Error("vmware_stop_vm(hard) returned success but VM is still running.");
+            await waitForVmRunningState(ssh, vmxPath, false, Math.min(timeoutMs, 40_000), "vmware_wait_stopped_hard");
           }),
         );
       }
