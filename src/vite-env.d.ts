@@ -10,5 +10,6 @@ interface ImportMetaEnv {
   readonly VITE_E2E_VM_PASSWORD?: string;
   readonly VITE_E2E_RUN_HARD_STOP?: string;
   readonly VITE_E2E_SCAN_ROOTS?: string;
+  readonly VITE_E2E_EXPECT_VMX_SUBSTR?: string;
   readonly VITE_E2E_TIMEOUT_MS?: string;
 }

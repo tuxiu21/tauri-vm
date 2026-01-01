@@ -1,14 +1,57 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 
+function parseDotenv(text) {
+  const out = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function mergeEnv(target, source) {
+  for (const [k, v] of Object.entries(source)) {
+    if (target[k] == null || String(target[k]).trim() === "") target[k] = v;
+  }
+}
+
+function loadEnvFile(filepath) {
+  try {
+    if (!fs.existsSync(filepath)) return {};
+    return parseDotenv(fs.readFileSync(filepath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+const repoRoot = path.resolve(process.cwd());
 const env = { ...process.env, VITE_E2E: "1" };
+const envFile = env.E2E_ENV_FILE
+  ? path.resolve(repoRoot, env.E2E_ENV_FILE)
+  : path.join(repoRoot, ".env.e2e");
+mergeEnv(env, loadEnvFile(envFile));
+mergeEnv(env, loadEnvFile(path.join(repoRoot, ".env.e2e.local")));
 
 const required = ["VITE_E2E_SSH_HOST", "VITE_E2E_SSH_USER"];
 const missing = required.filter((name) => !(env[name] && String(env[name]).trim()));
 if (missing.length) {
   console.error(
     `[e2e] Missing required env vars: ${missing.join(", ")}. ` +
-      "Set them (and optionally VITE_E2E_SSH_PORT / VITE_E2E_SSH_KEY_TEXT / VITE_E2E_VM_VMX_PATH) then re-run `pnpm e2e`.",
+      "Set them (or put them in .env.e2e / .env.e2e.local) and re-run `pnpm e2e`.",
   );
   process.exit(2);
 }

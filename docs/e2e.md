@@ -22,6 +22,7 @@ All variables are read from `import.meta.env`, so they must be prefixed with `VI
 - `VITE_E2E_VM_PASSWORD` (optional): VMware VM password (if required).
 - `VITE_E2E_RUN_HARD_STOP=1` (optional): also test `vmware_stop_vm` with `hard`.
 - `VITE_E2E_SCAN_ROOTS` (optional): JSON array of roots for `vmware_scan_vmx`, e.g. `["$env:USERPROFILE\\\\Documents\\\\Virtual Machines"]`.
+- `VITE_E2E_EXPECT_VMX_SUBSTR` (optional): if set, `vmware_scan_default_vmx` must return a path containing this substring (case-insensitive) or the suite fails.
 - `VITE_E2E_TIMEOUT_MS` (optional, default `120000`): per-step timeout.
 
 ## Example (PowerShell)
@@ -32,6 +33,7 @@ $env:VITE_E2E_SSH_HOST="192.168.5.100"
 $env:VITE_E2E_SSH_USER="rin"
 $env:VITE_E2E_SSH_PORT="22"
 $env:VITE_E2E_VM_VMX_PATH="C:\\Users\\rin\\Documents\\Virtual Machines\\TestVM\\TestVM.vmx"
+$env:VITE_E2E_EXPECT_VMX_SUBSTR="C:\\Users\\rin\\Documents\\Virtual Machines\\TestVM\\TestVM.vmx"
 $env:VITE_E2E_SCAN_ROOTS='["$env:USERPROFILE\\\\Documents\\\\Virtual Machines"]'
 
 pnpm tauri dev
@@ -40,9 +42,22 @@ pnpm tauri dev
 ## Quick Start (pnpm script)
 
 ```powershell
-$env:VITE_E2E_SSH_HOST="192.168.5.100"
-$env:VITE_E2E_SSH_USER="rin"
+pnpm e2e
+```
 
+## Avoid Re-Typing Env Vars
+
+Create a local `.env.e2e.local` (gitignored) in the repo root:
+
+```dotenv
+VITE_E2E_SSH_HOST=192.168.5.100
+VITE_E2E_SSH_USER=rin
+VITE_E2E_SSH_PORT=22
+```
+
+Then run:
+
+```powershell
 pnpm e2e
 ```
 

@@ -22,6 +22,10 @@ function envText(value: unknown): string | undefined {
   return text.trim() ? text : undefined;
 }
 
+function textIncludesInsensitive(haystack: string, needle: string): boolean {
+  return haystack.toLowerCase().includes(needle.toLowerCase());
+}
+
 function envJson<T>(value: unknown): T | undefined {
   const text = envText(value);
   if (!text) return undefined;
@@ -142,6 +146,7 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
   const vmxPath = envText(import.meta.env.VITE_E2E_VM_VMX_PATH);
   const vmPassword = envText(import.meta.env.VITE_E2E_VM_PASSWORD);
   const scanRoots = envJson<string[]>(import.meta.env.VITE_E2E_SCAN_ROOTS);
+  const expectVmxSubstr = envText(import.meta.env.VITE_E2E_EXPECT_VMX_SUBSTR);
   const keyText = envText(import.meta.env.VITE_E2E_SSH_KEY_TEXT);
   const runHardStop = envFlag(import.meta.env.VITE_E2E_RUN_HARD_STOP);
   const timeoutMs = Number(envText(import.meta.env.VITE_E2E_TIMEOUT_MS) || "120000");
@@ -225,7 +230,18 @@ export async function runE2EInvokeSuite(): Promise<{ ok: boolean; events: E2EEve
     }
 
     await runStep(events, "vmware_scan_default_vmx", () =>
-      withTimeout("vmware_scan_default_vmx", timeoutMs, () => tauri.vmwareScanDefaultVmx(ssh, newRequestId("vmware_scan_default_vmx"))),
+      withTimeout("vmware_scan_default_vmx", timeoutMs, async () => {
+        const paths = await tauri.vmwareScanDefaultVmx(ssh, newRequestId("vmware_scan_default_vmx"));
+        if (expectVmxSubstr) {
+          const ok = paths.some((p) => textIncludesInsensitive(p, expectVmxSubstr));
+          if (!ok) {
+            throw new Error(
+              `Expected vmx path containing "${expectVmxSubstr}" but scan returned ${paths.length} result(s).`,
+            );
+          }
+        }
+        return paths;
+      }),
     );
 
     if (Array.isArray(scanRoots) && scanRoots.length) {
