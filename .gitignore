@@ -32,3 +32,5 @@ src-tauri/resources/mypc
 src-tauri/resources/*.key
 src-tauri/resources/*.pem
 src-tauri/resources/id_*
+
+src-tauri/gen/android/keystore.properties

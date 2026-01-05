@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "e2e": "node ./scripts/run-e2e.mjs",
-    "android": "set CMAKE_GENERATOR=Ninja&& set \"CMAKE_MAKE_PROGRAM=C:\\ProgramData\\chocolatey\\bin\\ninja.exe\"&& tauri android dev --host 192.168.5.100"
+    "android": "set CMAKE_GENERATOR=Ninja&& set \"CMAKE_MAKE_PROGRAM=C:\\ProgramData\\chocolatey\\bin\\ninja.exe\"&& tauri android dev --host 10.15.29.105",
+    "android-build": "set CMAKE_GENERATOR=Ninja&& set \"CMAKE_MAKE_PROGRAM=C:\\ProgramData\\chocolatey\\bin\\ninja.exe\"&& tauri android build --apk true --split-per-abi"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
