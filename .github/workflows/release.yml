@@ -108,7 +108,7 @@ jobs:
         run: |
           keytool -genkeypair \
             -v \
-            -keystore src-tauri/gen/android/release-ci.jks \
+            -keystore src-tauri/gen/android/app/release-ci.jks \
             -storepass changeit \
             -keypass changeit \
             -alias release-ci \
