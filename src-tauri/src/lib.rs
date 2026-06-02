@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use russh::client;
 use russh::keys::{decode_secret_key, PrivateKey, PrivateKeyWithHashAlg};
 use russh::{ChannelMsg, Disconnect};
-use base64::Engine as _;
 use serde::Deserialize;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -36,7 +36,10 @@ fn format_exit_status(status: u32) -> String {
 }
 
 fn remote_exit_error(status: u32) -> String {
-    format!("Remote command exited with status {}", format_exit_status(status))
+    format!(
+        "Remote command exited with status {}",
+        format_exit_status(status)
+    )
 }
 
 fn powershell_encoded(script: &str) -> String {
@@ -244,7 +247,9 @@ impl SshSession {
             match msg {
                 ChannelMsg::Data { data } => output.extend_from_slice(data.as_ref()),
                 ChannelMsg::ExtendedData { data, .. } => output.extend_from_slice(data.as_ref()),
-                ChannelMsg::ExitStatus { exit_status: status } => exit_status = Some(status),
+                ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => exit_status = Some(status),
                 _ => {}
             }
         }
@@ -703,11 +708,17 @@ async fn vmware_start_vm_inner(
         return Err("VMX path contains unsupported characters".to_string());
     }
 
-    let (vm_password_exec, vm_password_log, cleanup_task_after_run) = if let Some(vm_password) = vm_password {
+    let (vm_password_exec, vm_password_log, cleanup_task_after_run) = if let Some(vm_password) =
+        vm_password
+    {
         if vm_password.contains('"') || vm_password.contains('\n') || vm_password.contains('\r') {
             return Err("VM password contains unsupported characters".to_string());
         }
-        (Some(ps_single_quote_escape(&vm_password)), "[REDACTED]".to_string(), true)
+        (
+            Some(ps_single_quote_escape(&vm_password)),
+            "[REDACTED]".to_string(),
+            true,
+        )
     } else {
         (None, "".to_string(), false)
     };
@@ -776,7 +787,11 @@ $out
         vmx = vmx_quoted,
         pw_line = pw_exec_line,
         has_pw = has_pw,
-        cleanup = if cleanup_task_after_run { "$true" } else { "$false" },
+        cleanup = if cleanup_task_after_run {
+            "$true"
+        } else {
+            "$false"
+        },
     );
 
     let ps_log = format!(
@@ -845,11 +860,16 @@ fn vmrun_requires_password(output: &str) -> bool {
 fn vmrun_bad_password(output: &str) -> bool {
     let t = output.to_lowercase();
     if t.contains("password") {
-        return t.contains("password is incorrect") || t.contains("incorrect password") || t.contains("not correct");
+        return t.contains("password is incorrect")
+            || t.contains("incorrect password")
+            || t.contains("not correct");
     }
 
     // Chinese variants
-    output.contains("密码不正确") || output.contains("密碼不正確") || output.contains("密码错误") || output.contains("密碼錯誤")
+    output.contains("密码不正确")
+        || output.contains("密碼不正確")
+        || output.contains("密码错误")
+        || output.contains("密碼錯誤")
 }
 
 #[tauri::command]
@@ -873,14 +893,25 @@ async fn vmware_start_vm_auto(
     request_id: Option<String>,
 ) -> Result<String, String> {
     if let Some(password) = get_vm_password(&app, &vmx_path)? {
-        return match vmware_start_vm_inner(&app, &store, ssh, vmx_path, Some(password), request_id).await {
+        return match vmware_start_vm_inner(&app, &store, ssh, vmx_path, Some(password), request_id)
+            .await
+        {
             Ok(out) => Ok(out),
             Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
             Err(err2) => Err(err2),
         };
     }
 
-    match vmware_start_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), None, request_id.clone()).await {
+    match vmware_start_vm_inner(
+        &app,
+        &store,
+        ssh.clone(),
+        vmx_path.clone(),
+        None,
+        request_id.clone(),
+    )
+    .await
+    {
         Ok(out) => Ok(out),
         Err(err) => {
             if vmrun_requires_password(&err) {
@@ -904,67 +935,142 @@ async fn vmware_stop_vm_inner(
 ) -> Result<String, String> {
     let mut session = ssh_connect(app, &ssh).await?;
     let vmx_quoted = ps_single_quote_escape(&vmx_path);
+    if vmx_path.contains('"') || vmx_path.contains('\n') || vmx_path.contains('\r') {
+        return Err("VMX path contains unsupported characters".to_string());
+    }
+
     let mode = mode.unwrap_or(VmStopMode::Soft);
     let mode_str = mode.as_str();
-    let (ps_exec, ps_log) = if let Some(vm_password) = vm_password {
-        let pw_quoted = ps_single_quote_escape(&vm_password);
+    let (pw_exec_line, pw_log_line, has_pw) = if let Some(vm_password) = vm_password {
+        if vm_password.contains('"') || vm_password.contains('\n') || vm_password.contains('\r') {
+            return Err("VM password contains unsupported characters".to_string());
+        }
         (
-            format!(
-                r#"
-{prelude}
-{locator}
-$vmx = '{vmx}'
-$vmPassword = '{pw}'
-$args = @('-T', 'ws', '-vp', $vmPassword, 'stop', $vmx, '{mode}')
-$out = & $vmrun @args 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
-$out
-"#,
-                prelude = powershell_prelude(),
-                locator = vmrun_locator_ps(),
-                vmx = vmx_quoted,
-                pw = pw_quoted,
-                mode = mode_str
-            ),
-            format!(
-                r#"
-{prelude}
-{locator}
-$vmx = '{vmx}'
-$vmPassword = '[REDACTED]'
-$args = @('-T', 'ws', '-vp', $vmPassword, 'stop', $vmx, '{mode}')
-$out = & $vmrun @args 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
-$out
-"#,
-                prelude = powershell_prelude(),
-                locator = vmrun_locator_ps(),
-                vmx = vmx_quoted,
-                mode = mode_str
-            ),
+            format!("$vmPassword = '{}'", ps_single_quote_escape(&vm_password)),
+            "$vmPassword = '[REDACTED]'".to_string(),
+            "$true",
         )
     } else {
-        let ps = format!(
-            r#"
-{}
-{}
-$out = & $vmrun -T ws stop '{}' {} 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun failed with exit code ' + $code }}; exit $code }}
-$out
-"#,
-            powershell_prelude(),
-            vmrun_locator_ps(),
-            vmx_quoted,
-            mode_str
-        );
-        (ps.clone(), ps)
+        ("".to_string(), "".to_string(), "$false")
     };
+
+    let ps_template = r#"
+{prelude}
+{locator}
+
+$vmx = '{vmx}'
+$mode = '{mode}'
+{pw_line}
+$hasPassword = {has_pw}
+
+function Invoke-VmrunStop([string]$target, [string]$label) {
+  $args = @('-T', 'ws')
+  if ($hasPassword) { $args += @('-vp', $vmPassword) }
+  $args += @('stop', $target, $mode)
+  $out = & $vmrun @args 2>&1
+  $code = $LASTEXITCODE
+  if ($null -eq $code) { $code = 1 }
+  [pscustomobject]@{ Code = $code; Label = $label; Output = (($out | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) }
+}
+
+function Write-StopResult($result) {
+  Write-Output ("STOP " + $result.Label + " exit=" + $result.Code)
+  if ($result.Output) { Write-Output $result.Output }
+}
+
+function Get-RunningVmxPaths {
+  $script:lastListOutput = ''
+  $listOut = & $vmrun -T ws list 2>&1
+  $listCode = $LASTEXITCODE
+  if ($null -eq $listCode) { $listCode = 1 }
+  $script:lastListOutput = (($listOut | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
+  if ($listCode -ne 0) { return @() }
+  @($listOut | ForEach-Object { [string]$_ } | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.ToLowerInvariant().StartsWith('total') } | ForEach-Object { $_.Trim('"') })
+}
+
+function Normalize-VmxPath([string]$path) {
+  if (-not $path) { return '' }
+  return $path.Trim().Trim('"').Replace('/', '\').ToLowerInvariant()
+}
+
+function Find-RunningMatch([string]$target) {
+  $needle = Normalize-VmxPath $target
+  @(Get-RunningVmxPaths) | Where-Object { (Normalize-VmxPath $_) -eq $needle } | Select-Object -First 1
+}
+
+$direct = Invoke-VmrunStop $vmx 'direct'
+Write-StopResult $direct
+if ($direct.Code -eq 0) { exit 0 }
+
+$runningMatch = Find-RunningMatch $vmx
+if (-not $runningMatch) {
+  Write-Output 'STOP verify=list_not_running'
+  if ($script:lastListOutput) { Write-Output $script:lastListOutput }
+  exit $direct.Code
+}
+
+Write-Output ('STOP verify=still_running path=' + $runningMatch)
+if ((Normalize-VmxPath $runningMatch) -ne (Normalize-VmxPath $vmx)) {
+  $canonical = Invoke-VmrunStop $runningMatch 'canonical'
+  Write-StopResult $canonical
+  if ($canonical.Code -eq 0) { exit 0 }
+  $runningMatch = Find-RunningMatch $vmx
+  if (-not $runningMatch) { exit 0 }
+}
+
+$hasScheduledTasks = $null -ne (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)
+if ($hasScheduledTasks -and -not $runningMatch.Contains('"')) {
+  $taskName = 'tauri-app-vmstop-temp-' + [guid]::NewGuid().ToString('N')
+  $arg = '-T ws '
+  if ($hasPassword) { $arg += ('-vp "' + $vmPassword + '" ') }
+  $arg += ('stop "' + $runningMatch + '" ' + $mode)
+  Write-Output ('TASK name=' + $taskName)
+  Write-Output ('TASK arg=' + $(if ($hasPassword) { $arg.Replace($vmPassword, '[REDACTED]') } else { $arg }))
+
+  try {
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
+    $action = New-ScheduledTaskAction -Execute $vmrun -Argument $arg
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+    for ($i = 0; $i -lt 60; $i++) {
+      Start-Sleep -Seconds 1
+      $stillRunning = Find-RunningMatch $vmx
+      Write-Output ('TASK wait=' + ($i + 1) + ' running=' + [bool]$stillRunning)
+      if (-not $stillRunning) {
+        try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+        exit 0
+      }
+    }
+    $info = Get-ScheduledTaskInfo -TaskName $taskName | Select-Object LastRunTime, LastTaskResult | ConvertTo-Json -Compress
+    Write-Output ('TASK info=' + $info)
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
+  } catch {
+    Write-Output 'TASK stop_failed'
+    Write-Output ($_ | Out-String)
+  }
+} else {
+  Write-Output 'TASK scheduledtasks_unavailable_or_unsupported_path'
+}
+
+Write-Output 'STOP still running after all attempts:'
+@(Get-RunningVmxPaths) | ForEach-Object { Write-Output $_ }
+exit $direct.Code
+"#;
+
+    let ps_exec = ps_template
+        .replace("{prelude}", powershell_prelude())
+        .replace("{locator}", vmrun_locator_ps())
+        .replace("{vmx}", &vmx_quoted)
+        .replace("{mode}", mode_str)
+        .replace("{pw_line}", &pw_exec_line)
+        .replace("{has_pw}", has_pw);
+    let ps_log = ps_template
+        .replace("{prelude}", powershell_prelude())
+        .replace("{locator}", vmrun_locator_ps())
+        .replace("{vmx}", &vmx_quoted)
+        .replace("{mode}", mode_str)
+        .replace("{pw_line}", &pw_log_line)
+        .replace("{has_pw}", has_pw);
     let exec_command = powershell_encoded(&ps_exec);
     let started = Instant::now();
     let res = session.exec_collect_full(&exec_command).await?;
@@ -1019,14 +1125,33 @@ async fn vmware_stop_vm_auto(
     request_id: Option<String>,
 ) -> Result<String, String> {
     if let Some(password) = get_vm_password(&app, &vmx_path)? {
-        return match vmware_stop_vm_inner(&app, &store, ssh, vmx_path, mode, Some(password), request_id).await {
+        return match vmware_stop_vm_inner(
+            &app,
+            &store,
+            ssh,
+            vmx_path,
+            mode,
+            Some(password),
+            request_id,
+        )
+        .await
+        {
             Ok(out) => Ok(out),
             Err(err2) if vmrun_bad_password(&err2) => Err(VM_PASSWORD_INVALID.to_string()),
             Err(err2) => Err(err2),
         };
     }
 
-    match vmware_stop_vm_inner(&app, &store, ssh.clone(), vmx_path.clone(), mode.clone(), None, request_id.clone()).await
+    match vmware_stop_vm_inner(
+        &app,
+        &store,
+        ssh.clone(),
+        vmx_path.clone(),
+        mode.clone(),
+        None,
+        request_id.clone(),
+    )
+    .await
     {
         Ok(out) => Ok(out),
         Err(err) => {

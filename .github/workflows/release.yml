@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: v0.1.0
+      prerelease:
+        description: Mark as prerelease
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows app
+        run: pnpm tauri build
+
+      - name: Upload Windows bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundles
+          path: |
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.nsis.zip
+          if-no-files-found: error
+
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.13113456" "cmdline-tools;latest"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.13113456" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.13113456" >> "$GITHUB_ENV"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create temporary Android signing key
+        run: |
+          keytool -genkeypair \
+            -v \
+            -keystore src-tauri/gen/android/release-ci.jks \
+            -storepass changeit \
+            -keypass changeit \
+            -alias release-ci \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=CI Release,O=tauri-app,C=US"
+          cat > src-tauri/gen/android/keystore.properties <<'EOF'
+          storeFile=release-ci.jks
+          storePassword=changeit
+          keyAlias=release-ci
+          keyPassword=changeit
+          EOF
+
+      - name: Build Android APKs
+        run: pnpm tauri android build --apk true --split-per-abi
+
+      - name: Upload Android APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-windows
+      - build-android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          PRERELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || 'false' }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find release-assets -type f | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+
+          args=(--title "$TAG_NAME" --notes "Automated Windows and Android build for $TAG_NAME." --target "$GITHUB_SHA")
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          else
+            args+=(--latest)
+          fi
+
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" "${args[@]}"
+          else
+            gh release create "$TAG_NAME" "${args[@]}"
+          fi
+
+          gh release upload "$TAG_NAME" "${assets[@]}" --clobber
