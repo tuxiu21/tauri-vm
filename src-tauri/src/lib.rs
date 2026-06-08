@@ -934,171 +934,273 @@ async fn vmware_stop_vm_inner(
     request_id: Option<String>,
 ) -> Result<String, String> {
     let mut session = ssh_connect(app, &ssh).await?;
-    let vmx_quoted = ps_single_quote_escape(&vmx_path);
     if vmx_path.contains('"') || vmx_path.contains('\n') || vmx_path.contains('\r') {
         return Err("VMX path contains unsupported characters".to_string());
     }
 
     let mode = mode.unwrap_or(VmStopMode::Soft);
     let mode_str = mode.as_str();
-    let (pw_exec_line, pw_log_line, has_pw) = if let Some(vm_password) = vm_password {
+    let (pw_exec_line, pw_log_line, has_password) = if let Some(vm_password) = vm_password {
         if vm_password.contains('"') || vm_password.contains('\n') || vm_password.contains('\r') {
             return Err("VM password contains unsupported characters".to_string());
         }
         (
             format!("$vmPassword = '{}'", ps_single_quote_escape(&vm_password)),
             "$vmPassword = '[REDACTED]'".to_string(),
-            "$true",
+            true,
         )
     } else {
-        ("".to_string(), "".to_string(), "$false")
+        ("".to_string(), "".to_string(), false)
     };
 
-    let ps_template = r#"
+    let stop_script = |target: &str, label: &str, pw_line: &str| {
+        format!(
+            r#"
 {prelude}
 {locator}
-
-$vmx = '{vmx}'
-$mode = '{mode}'
+$v='{vmx}'
+$m='{mode}'
 {pw_line}
-$hasPassword = {has_pw}
+$a=@('-T','ws')
+if({has_password}){{ $a+=@('-vp',$vmPassword) }}
+$a+=@('stop',$v,$m)
+$o=& $vmrun @a 2>&1
+$c=$LASTEXITCODE
+if($null -eq $c){{ $c=1 }}
+"STOP {label} exit=$c"
+if($o){{ $o }}
+exit $c
+"#,
+            prelude = powershell_prelude(),
+            locator = vmrun_locator_ps(),
+            vmx = ps_single_quote_escape(target),
+            mode = mode_str,
+            pw_line = pw_line,
+            has_password = if has_password { "$true" } else { "$false" },
+            label = label,
+        )
+    };
 
-function Invoke-VmrunStop([string]$target, [string]$label) {
-  $args = @('-T', 'ws')
-  if ($hasPassword) { $args += @('-vp', $vmPassword) }
-  $args += @('stop', $target, $mode)
-  $out = & $vmrun @args 2>&1
-  $code = $LASTEXITCODE
-  if ($null -eq $code) { $code = 1 }
-  [pscustomobject]@{ Code = $code; Label = $label; Output = (($out | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) }
-}
+    let list_script = format!(
+        r#"
+{prelude}
+{locator}
+$o=& $vmrun -T ws list 2>&1
+$c=$LASTEXITCODE
+if($null -eq $c){{ $c=1 }}
+if($c -ne 0){{ if($o){{ $o }}; exit $c }}
+$o
+"#,
+        prelude = powershell_prelude(),
+        locator = vmrun_locator_ps(),
+    );
 
-function Write-StopResult($result) {
-  Write-Output ("STOP " + $result.Label + " exit=" + $result.Code)
-  if ($result.Output) { Write-Output $result.Output }
-}
+    let task_script = |target: &str, pw_line: &str| {
+        format!(
+            r#"
+{prelude}
+{locator}
+$v='{vmx}'
+$m='{mode}'
+{pw_line}
+$tn='tauri-vmstop-'+[guid]::NewGuid().ToString('N')
+$arg='-T ws '
+if({has_password}){{ $arg+='-vp "'+$vmPassword+'" ' }}
+$arg+='stop "'+$v+'" '+$m
+$tr=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
+$ac=New-ScheduledTaskAction -Execute $vmrun -Argument $arg
+Register-ScheduledTask -TaskName $tn -Action $ac -Trigger $tr -Force|Out-Null
+Start-ScheduledTask -TaskName $tn
+"TASK started $tn"
+"#,
+            prelude = powershell_prelude(),
+            locator = vmrun_locator_ps(),
+            vmx = ps_single_quote_escape(target),
+            mode = mode_str,
+            pw_line = pw_line,
+            has_password = if has_password { "$true" } else { "$false" },
+        )
+    };
 
-function Get-RunningVmxPaths {
-  $script:lastListOutput = ''
-  $listOut = & $vmrun -T ws list 2>&1
-  $listCode = $LASTEXITCODE
-  if ($null -eq $listCode) { $listCode = 1 }
-  $script:lastListOutput = (($listOut | ForEach-Object { [string]$_ }) -join [Environment]::NewLine)
-  if ($listCode -ne 0) { return @() }
-  @($listOut | ForEach-Object { [string]$_ } | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.ToLowerInvariant().StartsWith('total') } | ForEach-Object { $_.Trim('"') })
-}
+    let run_step = |label: &str, script: &str, output: &ExecCollected, log: &mut String| {
+        let status = output
+            .exit_status
+            .map(format_exit_status)
+            .unwrap_or_else(|| "missing".to_string());
+        log.push_str(&format!("\n## {label} status={status}\n"));
+        if output.output.trim().is_empty() {
+            log.push_str("(no output)\n");
+        } else {
+            log.push_str(output.output.trim());
+            log.push('\n');
+        }
+        log.push_str("### script\n");
+        log.push_str(script.trim());
+        log.push('\n');
+    };
 
-function Normalize-VmxPath([string]$path) {
-  if (-not $path) { return '' }
-  return $path.Trim().Trim('"').Replace('/', '\').ToLowerInvariant()
-}
-
-function Find-RunningMatch([string]$target) {
-  $needle = Normalize-VmxPath $target
-  @(Get-RunningVmxPaths) | Where-Object { (Normalize-VmxPath $_) -eq $needle } | Select-Object -First 1
-}
-
-$direct = Invoke-VmrunStop $vmx 'direct'
-Write-StopResult $direct
-if ($direct.Code -eq 0) { exit 0 }
-
-$runningMatch = Find-RunningMatch $vmx
-if (-not $runningMatch) {
-  Write-Output 'STOP verify=list_not_running'
-  if ($script:lastListOutput) { Write-Output $script:lastListOutput }
-  exit $direct.Code
-}
-
-Write-Output ('STOP verify=still_running path=' + $runningMatch)
-if ((Normalize-VmxPath $runningMatch) -ne (Normalize-VmxPath $vmx)) {
-  $canonical = Invoke-VmrunStop $runningMatch 'canonical'
-  Write-StopResult $canonical
-  if ($canonical.Code -eq 0) { exit 0 }
-  $runningMatch = Find-RunningMatch $vmx
-  if (-not $runningMatch) { exit 0 }
-}
-
-$hasScheduledTasks = $null -ne (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)
-if ($hasScheduledTasks -and -not $runningMatch.Contains('"')) {
-  $taskName = 'tauri-app-vmstop-temp-' + [guid]::NewGuid().ToString('N')
-  $arg = '-T ws '
-  if ($hasPassword) { $arg += ('-vp "' + $vmPassword + '" ') }
-  $arg += ('stop "' + $runningMatch + '" ' + $mode)
-  Write-Output ('TASK name=' + $taskName)
-  Write-Output ('TASK arg=' + $(if ($hasPassword) { $arg.Replace($vmPassword, '[REDACTED]') } else { $arg }))
-
-  try {
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
-    $action = New-ScheduledTaskAction -Execute $vmrun -Argument $arg
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName
-    for ($i = 0; $i -lt 60; $i++) {
-      Start-Sleep -Seconds 1
-      $stillRunning = Find-RunningMatch $vmx
-      Write-Output ('TASK wait=' + ($i + 1) + ' running=' + [bool]$stillRunning)
-      if (-not $stillRunning) {
-        try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
-        exit 0
-      }
+    async fn exec_step(session: &mut SshSession, script: String) -> Result<ExecCollected, String> {
+        let exec_command = powershell_encoded(&script);
+        session.exec_collect_full(&exec_command).await
     }
-    $info = Get-ScheduledTaskInfo -TaskName $taskName | Select-Object LastRunTime, LastTaskResult | ConvertTo-Json -Compress
-    Write-Output ('TASK info=' + $info)
-    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
-  } catch {
-    Write-Output 'TASK stop_failed'
-    Write-Output ($_ | Out-String)
-  }
-} else {
-  Write-Output 'TASK scheduledtasks_unavailable_or_unsupported_path'
-}
 
-Write-Output 'STOP still running after all attempts:'
-@(Get-RunningVmxPaths) | ForEach-Object { Write-Output $_ }
-exit $direct.Code
-"#;
-
-    let ps_exec = ps_template
-        .replace("{prelude}", powershell_prelude())
-        .replace("{locator}", vmrun_locator_ps())
-        .replace("{vmx}", &vmx_quoted)
-        .replace("{mode}", mode_str)
-        .replace("{pw_line}", &pw_exec_line)
-        .replace("{has_pw}", has_pw);
-    let ps_log = ps_template
-        .replace("{prelude}", powershell_prelude())
-        .replace("{locator}", vmrun_locator_ps())
-        .replace("{vmx}", &vmx_quoted)
-        .replace("{mode}", mode_str)
-        .replace("{pw_line}", &pw_log_line)
-        .replace("{has_pw}", has_pw);
-    let exec_command = powershell_encoded(&ps_exec);
     let started = Instant::now();
-    let res = session.exec_collect_full(&exec_command).await?;
+    let mut command_log = String::new();
+    let mut output_log = String::new();
+    let mut final_error: Option<String> = None;
+
+    let direct_exec = stop_script(&vmx_path, "direct", &pw_exec_line);
+    let direct_log = stop_script(&vmx_path, "direct", &pw_log_line);
+    command_log.push_str("## direct_stop\n");
+    command_log.push_str(direct_log.trim());
+    command_log.push('\n');
+    let direct = exec_step(&mut session, direct_exec).await?;
+    run_step("direct_stop", &direct_log, &direct, &mut output_log);
+
+    let mut ok = direct.exit_status.unwrap_or(0) == 0;
+    if !ok {
+        command_log.push_str("\n## list_after_direct\n");
+        command_log.push_str(list_script.trim());
+        command_log.push('\n');
+        let list_after_direct = exec_step(&mut session, list_script.clone()).await?;
+        run_step(
+            "list_after_direct",
+            &list_script,
+            &list_after_direct,
+            &mut output_log,
+        );
+
+        if list_after_direct.exit_status.unwrap_or(0) != 0 {
+            final_error = Some(list_after_direct.output.trim().to_string());
+        } else {
+            let running = parse_vmrun_list_output(&list_after_direct.output);
+            let needle = normalize_vmx_key(&vmx_path);
+            let running_match = running
+                .iter()
+                .find(|path| normalize_vmx_key(path) == needle)
+                .cloned();
+
+            if let Some(running_match) = running_match {
+                output_log.push_str(&format!("## matched_running_path\n{running_match}\n"));
+
+                let canonical_exec = stop_script(&running_match, "canonical", &pw_exec_line);
+                let canonical_log = stop_script(&running_match, "canonical", &pw_log_line);
+                command_log.push_str("\n## canonical_stop\n");
+                command_log.push_str(canonical_log.trim());
+                command_log.push('\n');
+                let canonical = exec_step(&mut session, canonical_exec).await?;
+                run_step(
+                    "canonical_stop",
+                    &canonical_log,
+                    &canonical,
+                    &mut output_log,
+                );
+
+                if canonical.exit_status.unwrap_or(0) == 0 {
+                    ok = true;
+                } else {
+                    command_log.push_str("\n## list_after_canonical\n");
+                    command_log.push_str(list_script.trim());
+                    command_log.push('\n');
+                    let list_after_canonical = exec_step(&mut session, list_script.clone()).await?;
+                    run_step(
+                        "list_after_canonical",
+                        &list_script,
+                        &list_after_canonical,
+                        &mut output_log,
+                    );
+
+                    let still_running = list_after_canonical.exit_status.unwrap_or(0) == 0
+                        && parse_vmrun_list_output(&list_after_canonical.output)
+                            .iter()
+                            .any(|path| normalize_vmx_key(path) == needle);
+
+                    if !still_running {
+                        ok = true;
+                    } else if running_match.contains('"') {
+                        final_error = Some(
+                            "Scheduled task stop skipped: VMX path contains quotes".to_string(),
+                        );
+                    } else {
+                        let task_exec = task_script(&running_match, &pw_exec_line);
+                        let task_log = task_script(&running_match, &pw_log_line);
+                        command_log.push_str("\n## scheduled_task_stop\n");
+                        command_log.push_str(task_log.trim());
+                        command_log.push('\n');
+                        let task = exec_step(&mut session, task_exec).await?;
+                        run_step("scheduled_task_stop", &task_log, &task, &mut output_log);
+
+                        if task.exit_status.unwrap_or(0) != 0 {
+                            final_error = Some(task.output.trim().to_string());
+                        } else {
+                            for poll in 1..=60 {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                let poll_res = exec_step(&mut session, list_script.clone()).await?;
+                                let poll_running = poll_res.exit_status.unwrap_or(0) == 0
+                                    && parse_vmrun_list_output(&poll_res.output)
+                                        .iter()
+                                        .any(|path| normalize_vmx_key(path) == needle);
+                                output_log.push_str(&format!(
+                                    "## scheduled_task_poll poll={poll} running={poll_running}\n"
+                                ));
+                                if poll_running {
+                                    output_log.push_str(poll_res.output.trim());
+                                    output_log.push('\n');
+                                } else {
+                                    ok = true;
+                                    break;
+                                }
+                            }
+
+                            if !ok {
+                                final_error = Some(
+                                    "VM is still running after scheduled task stop".to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                output_log
+                    .push_str("## list_result\nVM not found in running list after direct stop\n");
+                ok = true;
+            }
+        }
+    }
+
     let _ = session.close().await;
 
-    let ok = res.exit_status.unwrap_or(0) == 0;
+    let output = output_log.trim().to_string();
+    let error = if ok {
+        None
+    } else {
+        Some(truncate_text(
+            final_error
+                .as_deref()
+                .filter(|err| !err.trim().is_empty())
+                .unwrap_or(output.trim()),
+            8 * 1024,
+        ))
+    };
+
     store.push(TraceEntry {
         id: 0,
         at: now_ms(),
         action: "vmware_stop_vm".to_string(),
         ok,
         duration_ms: started.elapsed().as_millis() as u64,
-        command: truncate_text(ps_log.trim(), 16 * 1024),
-        output: truncate_text(&res.output, 64 * 1024),
-        error: if ok {
-            None
-        } else {
-            Some(truncate_text(res.output.trim(), 8 * 1024))
-        },
+        command: truncate_text(command_log.trim(), 16 * 1024),
+        output: truncate_text(&output, 64 * 1024),
+        error: error.clone(),
         request_id,
     });
 
     if ok {
-        Ok(res.output)
-    } else if res.output.trim().is_empty() {
-        Err(remote_exit_error(res.exit_status.unwrap_or(1)))
+        Ok(output)
+    } else if let Some(error) = error {
+        Err(error)
     } else {
-        Err(res.output.trim().to_string())
+        Err("VM stop failed".to_string())
     }
 }
 
