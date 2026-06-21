@@ -36,6 +36,42 @@ export function SettingsPage(props: {
     () => ["$env:USERPROFILE\\Documents\\Virtual Machines", "$env:PUBLIC\\Documents\\Shared Virtual Machines"],
     [],
   );
+  const diagPresets = useMemo(
+    () => [
+      {
+        label: "主机名",
+        command: 'powershell -NoProfile -NonInteractive -Command "hostname"',
+      },
+      {
+        label: "当前时间",
+        command: 'powershell -NoProfile -NonInteractive -Command "Get-Date"',
+      },
+      {
+        label: "VMware 进程",
+        command:
+          'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"Name = \'vmware-vmx.exe\'\\" | Select-Object ProcessId,CommandLine | Format-List"',
+      },
+      {
+        label: "可用电源状态",
+        command: 'powershell -NoProfile -NonInteractive -Command "powercfg /a"',
+      },
+      {
+        label: "取消关机",
+        command: 'powershell -NoProfile -NonInteractive -Command "shutdown /a"',
+      },
+      {
+        label: "重启宿主机",
+        command:
+          'powershell -NoProfile -NonInteractive -Command "shutdown /r /t 10 /c \\"Tauri remote restart requested\\""',
+      },
+      {
+        label: "关闭宿主机",
+        command:
+          'powershell -NoProfile -NonInteractive -Command "shutdown /s /t 10 /c \\"Tauri remote shutdown requested\\""',
+      },
+    ],
+    [],
+  );
 
   function addRoot(value: string) {
     const trimmed = value.trim();
@@ -64,8 +100,48 @@ export function SettingsPage(props: {
     return map;
   }, [props.traces]);
 
+  function formatLogForCopy(event: LogEvent, trace?: TraceEntry) {
+    const lines = [
+      `${event.action}${new Date(event.at).toLocaleString()}${typeof event.durationMs === "number" ? ` · ${event.durationMs}ms` : ""}`,
+      event.summary || "",
+      event.error || "",
+      "",
+      "Meta",
+      JSON.stringify(event.meta ?? {}, null, 2),
+    ];
+
+    if (trace) {
+      lines.push(
+        "",
+        "Trace",
+        JSON.stringify(
+          {
+            action: trace.action,
+            ok: trace.ok,
+            durationMs: trace.durationMs,
+            error: trace.error,
+            requestId: trace.requestId,
+          },
+          null,
+          2,
+        ),
+        "",
+        "Command",
+        trace.command || "(empty)",
+        "",
+        "Output",
+        trace.output || "(empty)",
+      );
+    } else {
+      lines.push("", "Trace", "(no command trace data)");
+    }
+
+    return lines.filter((line, index, arr) => line !== "" || arr[index - 1] !== "").join("\n");
+  }
+
   function copyEvent(event: LogEvent) {
-    return navigator.clipboard.writeText(JSON.stringify(event, null, 2));
+    const trace = event.requestId ? traceMap.get(event.requestId) : undefined;
+    return navigator.clipboard.writeText(formatLogForCopy(event, trace));
   }
 
   return (
@@ -230,6 +306,19 @@ export function SettingsPage(props: {
             placeholder='例如：powershell -NoProfile -Command "Get-Date"'
           />
         </label>
+
+        <div className="mt-2 flex flex-wrap gap-2">
+          {diagPresets.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className={ui.button}
+              onClick={() => props.onSetDiagCommand(preset.command)}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
 
         <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
           <button

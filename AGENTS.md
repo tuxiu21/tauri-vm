@@ -23,6 +23,16 @@ Use `pnpm` (lockfile: `pnpm-lock.yaml`).
 ## Testing Guidelines
 No dedicated test runner is configured currently (no `vitest/jest` scripts detected). If you add tests, document the framework and add a `pnpm test` script.
 
+## VMware Control Notes
+- Be careful when changing encrypted/password-protected VM start behavior in `src-tauri/src/lib.rs`.
+- VMware behaves differently across direct `vmrun`, Windows Scheduled Tasks, and locked/black-screen host sessions.
+- No saved VM password: call direct `vmrun start` so VMware can immediately return "password required".
+- Saved VM password: keep the Scheduled Task start path first; this is the path that reliably starts the VM on the remote Windows host.
+- Wrong saved VM password: Scheduled Task may only report that the task started while the VM never appears in `vmrun list`. If the task path does not reach running state, run direct `vmrun -vp ... start ...` only to collect the explicit password error.
+- Do not replace the password start flow with a direct `vmrun -vp` preflight only; that can break correct-password startup even though it improves wrong-password reporting.
+- Do not require matching `vmware-vmx.exe` command lines as the sole startup success condition; `vmrun list` is the more reliable app-level signal for this project.
+- For VM start/stop changes, run real e2e against the Windows 11 VM for all three cases: no password, wrong password, and correct password.
+
 ## Commit & Pull Request Guidelines
 - Commits follow a lightweight Conventional Commits style: `feat: …`, `fix: …`, `chore: …`, `docs: …`.
 - PRs: include a short description, steps to verify (commands + expected behavior), and screenshots/gifs for UI changes.

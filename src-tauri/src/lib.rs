@@ -731,59 +731,17 @@ async fn vmware_start_vm_inner(
 
     let ps_exec = format!(
         r#"
-{prelude}
-{locator}
-
-$vmx = '{vmx}'
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+$p=@('C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe','C:\Program Files\VMware\VMware Workstation\vmrun.exe');$vmrun=$p|?{{Test-Path -LiteralPath $_}}|select -First 1;if(!$vmrun){{throw 'vmrun.exe not found'}}
+$v='{vmx}'
 {pw_line}
-$hasPassword = {has_pw}
-$taskName = 'tauri-app-vmstart-temp'
-
-$arg = '-T ws '
-if ($hasPassword) {{ $arg += ('-vp "' + $vmPassword + '" ') }}
-$arg += ('start "' + $vmx + '" nogui')
-
-Write-Output ("TASK name=" + $taskName)
-Write-Output ("TASK arg=" + $arg)
-
-$hasScheduledTasks = $null -ne (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)
-if ($hasScheduledTasks) {{
-  try {{
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
-  }} catch {{ }}
-
-  try {{
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
-    $action = New-ScheduledTaskAction -Execute $vmrun -Argument $arg
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName
-    Start-Sleep -Milliseconds 250
-    $info = Get-ScheduledTaskInfo -TaskName $taskName | Select-Object LastRunTime, LastTaskResult | ConvertTo-Json -Compress
-    Write-Output ("TASK info=" + $info)
-    if ({cleanup}) {{
-      try {{ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null }} catch {{ }}
-    }}
-    exit 0
-  }} catch {{
-    Write-Output "TASK register_or_run_failed"
-    Write-Output ($_ | Out-String)
-  }}
-}} else {{
-  Write-Output "TASK scheduledtasks_module_missing"
-}}
-
-# Fallback to direct vmrun invocation (legacy behavior).
-$args = @('-T','ws')
-if ($hasPassword) {{ $args += @('-vp', $vmPassword) }}
-$args += @('start',$vmx,'nogui')
-$out = & $vmrun @args 2>&1
-$code = $LASTEXITCODE
-if ($null -eq $code) {{ $code = 1 }}
-if ($code -ne 0) {{ if ($out) {{ $out }} else {{ 'vmrun start failed with exit code ' + $code }}; exit $code }}
-$out
+$hp={has_pw};$tn='tauri-app-vmstart-temp'
+function W{{for($i=1;$i-le30;$i++){{sleep 1;$o=&$vmrun -T ws list 2>&1;if($LASTEXITCODE-eq0 -and (($o-join"`n").IndexOf($v,[StringComparison]::OrdinalIgnoreCase)-ge0)){{return $true}}}}}}
+if(!$hp){{$a=@('-T','ws','start',$v,'nogui');$o=&$vmrun @a 2>&1;$c=$LASTEXITCODE;if($null-eq$c){{$c=1}};if($c-ne0){{if($o){{$o}}else{{"vmrun start failed $c"}};exit $c}};$o;exit 0}}
+$arg='-T ws -vp "'+$vmPassword+'" start "'+$v+'" nogui'
+try{{Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue|Out-Null;$tr=New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1);$ac=New-ScheduledTaskAction -Execute $vmrun -Argument $arg;Register-ScheduledTask -TaskName $tn -Action $ac -Trigger $tr -Force|Out-Null;Start-ScheduledTask -TaskName $tn;"TASK started";sleep 8;$lo=&$vmrun -T ws list 2>&1;$listed=$LASTEXITCODE-eq0 -and (($lo-join"`n").IndexOf($v,[StringComparison]::OrdinalIgnoreCase)-ge0);if({cleanup}){{Unregister-ScheduledTask -TaskName $tn -Confirm:$false -ErrorAction SilentlyContinue|Out-Null}};if($listed){{exit 0}};"TASK not running; trying direct"}}catch{{"TASK failed";$_|Out-String}}
+$a=@('-T','ws','-vp',$vmPassword,'start',$v,'nogui');$o=&$vmrun @a 2>&1;$c=$LASTEXITCODE;if($null-eq$c){{$c=1}};if($c-ne0){{if($o){{$o}}else{{"vmrun start failed $c"}};exit $c}};$o;exit 0
 "#,
-        prelude = powershell_prelude(),
-        locator = vmrun_locator_ps(),
         vmx = vmx_quoted,
         pw_line = pw_exec_line,
         has_pw = has_pw,
@@ -854,7 +812,10 @@ fn vmrun_requires_password(output: &str) -> bool {
 
     // Chinese (common VMware Workstation messages on Windows)
     // e.g. "此操作需要输入密码"
-    output.contains("密码") || output.contains("需要输入密码") || output.contains("需要輸入密碼")
+    output.contains("密码")
+        || output.contains("需要输入密码")
+        || output.contains("需要輸入密碼")
+        || output.contains("姝ゆ搷浣滈渶瑕佽緭鍏ュ瘑鐮")
 }
 
 fn vmrun_bad_password(output: &str) -> bool {
@@ -867,7 +828,9 @@ fn vmrun_bad_password(output: &str) -> bool {
 
     // Chinese variants
     output.contains("密码不正确")
+        || output.contains("不正确的密码")
         || output.contains("密碼不正確")
+        || output.contains("不正確的密碼")
         || output.contains("密码错误")
         || output.contains("密碼錯誤")
 }
@@ -1022,6 +985,28 @@ Start-ScheduledTask -TaskName $tn
         )
     };
 
+    let kill_process_script = |target: &str| {
+        format!(
+            r#"
+{prelude}
+$v='{vmx}'
+$matches=@(Get-CimInstance Win32_Process -Filter "Name = 'vmware-vmx.exe'" -ErrorAction SilentlyContinue | Where-Object {{
+  $cmd=$_.CommandLine
+  $cmd -and $cmd.IndexOf($v, [StringComparison]::OrdinalIgnoreCase) -ge 0
+}})
+if($matches.Count -eq 0){{ "No matching vmware-vmx.exe process found for $v"; exit 2 }}
+foreach($p in $matches){{
+  Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop
+  "KILLED vmware-vmx.exe pid=$($p.ProcessId)"
+}}
+Start-Sleep -Seconds 2
+exit 0
+"#,
+            prelude = powershell_prelude(),
+            vmx = ps_single_quote_escape(target),
+        )
+    };
+
     let run_step = |label: &str, script: &str, output: &ExecCollected, log: &mut String| {
         let status = output
             .exit_status
@@ -1156,6 +1141,56 @@ Start-ScheduledTask -TaskName $tn
                                 final_error = Some(
                                     "VM is still running after scheduled task stop".to_string(),
                                 );
+                            }
+
+                            if !ok && matches!(mode, VmStopMode::Hard) {
+                                let kill_exec = kill_process_script(&running_match);
+                                command_log.push_str("\n## kill_vmware_vmx_process\n");
+                                command_log.push_str(kill_exec.trim());
+                                command_log.push('\n');
+                                let kill_res = exec_step(&mut session, kill_exec.clone()).await?;
+                                run_step(
+                                    "kill_vmware_vmx_process",
+                                    &kill_exec,
+                                    &kill_res,
+                                    &mut output_log,
+                                );
+
+                                if kill_res.exit_status.unwrap_or(0) == 0 {
+                                    for poll in 1..=10 {
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        let poll_res =
+                                            exec_step(&mut session, list_script.clone()).await?;
+                                        let poll_running = poll_res.exit_status.unwrap_or(0) == 0
+                                            && parse_vmrun_list_output(&poll_res.output)
+                                                .iter()
+                                                .any(|path| normalize_vmx_key(path) == needle);
+                                        output_log.push_str(&format!(
+                                            "## kill_process_poll poll={poll} running={poll_running}\n"
+                                        ));
+                                        if poll_running {
+                                            output_log.push_str(poll_res.output.trim());
+                                            output_log.push('\n');
+                                        } else {
+                                            ok = true;
+                                            final_error = None;
+                                            break;
+                                        }
+                                    }
+
+                                    if !ok {
+                                        final_error = Some(
+                                            "VM is still listed after killing vmware-vmx.exe"
+                                                .to_string(),
+                                        );
+                                    }
+                                } else if kill_res.output.trim().is_empty() {
+                                    final_error = Some(remote_exit_error(
+                                        kill_res.exit_status.unwrap_or(1),
+                                    ));
+                                } else {
+                                    final_error = Some(kill_res.output.trim().to_string());
+                                }
                             }
                         }
                     }
